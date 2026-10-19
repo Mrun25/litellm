@@ -3,9 +3,12 @@ from typing import Final
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
+import httpx
 import litellm
 import pytest
 import respx
+
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 
 
 MOCK_EMBEDDING_RESPONSE = [[0.1, 0.2, 0.3, 0.4, 0.5]]
@@ -171,6 +174,60 @@ class TestHuggingFaceEmbedding:
             "inputs": {"source_sentence": "source sentence", "sentences": ["candidate sentence"]},
             "parameters": {"min_length": 2},
         }
+
+    def test_embedding_dispatch_passes_timeout_to_handler(self):
+        """main.embedding() must forward the user timeout to the HF handler (issue #47299)."""
+        with patch("litellm.main.huggingface_embed") as mock_hf:
+            mock_hf.embedding.return_value = litellm.utils.EmbeddingResponse()
+            litellm.embedding(
+                model=self.model,
+                input=["hello world"],
+                input_type="embed",
+                timeout=45,
+            )
+
+            mock_hf.embedding.assert_called_once()
+            assert mock_hf.embedding.call_args.kwargs["timeout"] == 45
+
+    def test_sync_embedding_forwards_timeout_to_http_client(self):
+        """Sync path must build its HTTP client with the user timeout (issue #47299)."""
+        real_init: Final = HTTPHandler.__init__
+        inits: list = []
+
+        def capturing_init(self, *args, **kwargs):
+            inits.append(kwargs)
+            real_init(self, *args, **kwargs)
+
+        with patch.object(HTTPHandler, "__init__", capturing_init):
+            litellm.embedding(
+                model=self.model,
+                input=["hello world"],
+                input_type="embed",
+                timeout=45,
+            )
+
+        self.mock_http.assert_called_once()
+        timeouts = [kw["timeout"] for kw in inits if "timeout" in kw]
+        assert any(t.read == 45.0 for t in timeouts), f"no client built with timeout=45: {inits}"
+
+    async def test_async_embedding_forwards_timeout_to_http_client(self):
+        """Async path must build its HTTP client with the user timeout (issue #47299)."""
+        with patch("litellm.llms.huggingface.embedding.handler.get_async_httpx_client") as mock_get_client:
+            mock_get_client.side_effect = lambda **kwargs: AsyncHTTPHandler()
+            await litellm.aembedding(
+                model=self.model,
+                input=["hello world"],
+                input_type="embed",
+                timeout=45,
+            )
+
+            mock_get_client.assert_called_once()
+            timeout_param = mock_get_client.call_args.kwargs["params"]["timeout"]
+            if isinstance(timeout_param, httpx.Timeout):
+                assert timeout_param.read == 45.0
+            else:
+                assert timeout_param == 45
+        self.mock_async_http.assert_called_once()
 
 
 @pytest.mark.parametrize("sync_mode", [True, False])

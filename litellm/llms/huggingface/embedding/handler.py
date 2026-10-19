@@ -21,6 +21,22 @@ config: Final = HuggingFaceEmbeddingConfig()
 
 HF_HUB_URL: Final = "https://huggingface.co"
 
+
+def _timeout_client_params(timeout: float | httpx.Timeout | None) -> dict:
+    """Client-constructor params carrying an explicit request timeout.
+
+    Returns an empty dict when no usable timeout was given, so the client
+    keeps its default (``httpx.Timeout(None)`` is treated as "not set").
+    """
+    if isinstance(timeout, (int, float)):
+        return {"timeout": httpx.Timeout(timeout)}
+    if isinstance(timeout, httpx.Timeout) and any(
+        value is not None for value in (timeout.connect, timeout.read, timeout.write, timeout.pool)
+    ):
+        return {"timeout": timeout}
+    return {}
+
+
 hf_tasks_embeddings: Final = (
     Literal[  # pipeline tags + hf tei endpoints - https://huggingface.github.io/text-embeddings-inference/#/
         "sentence-similarity", "feature-extraction", "rerank", "embed", "similarity"
@@ -265,6 +281,7 @@ class HuggingFaceEmbedding(BaseLLM):
         if client is None:
             client = get_async_httpx_client(
                 llm_provider=litellm.LlmProviders.HUGGINGFACE,
+                params=_timeout_client_params(timeout),
             )
 
         response: Final = await client.post(api_base, headers=headers, data=json.dumps(data))
@@ -369,7 +386,7 @@ class HuggingFaceEmbedding(BaseLLM):
         )
         ## COMPLETION CALL
         if client is None or not isinstance(client, HTTPHandler):
-            client = HTTPHandler(concurrent_limit=1)
+            client = HTTPHandler(concurrent_limit=1, **_timeout_client_params(timeout))
         response: Final = client.post(embed_url, headers=headers, data=json.dumps(data))
 
         ## LOGGING
