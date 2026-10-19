@@ -2130,3 +2130,44 @@ def test_get_modified_max_tokens_leaves_a_gemini_4_long_decode_budget_alone(monk
         )
         == 200_000
     )
+
+
+# Regression for #47396: Anthropic-format tool_choice dicts must not raise in the
+# counting path - the /v1/messages budget reservation fell back to max_input_tokens
+# when they did.
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "auto"},
+        {"type": "any"},
+        {"type": "none"},
+        {"type": "tool", "name": "get_weather"},
+    ],
+)
+def test_token_counter_accepts_anthropic_tool_choice_shapes(tool_choice: object):
+    tools: Final = [_openai_tool(_WEATHER_FUNCTION)]
+
+    counted: Final = token_counter_new(
+        model="gpt-4o", messages=list(_USER_MESSAGES), tools=tools, tool_choice=tool_choice
+    )
+    without: Final = token_counter_new(model="gpt-4o", messages=list(_USER_MESSAGES), tools=tools)
+
+    assert counted > without
+
+
+def test_token_counter_anthropic_named_tool_matches_openai_named_tool():
+    tools: Final = [_openai_tool(_WEATHER_FUNCTION)]
+
+    anthropic_named: Final = token_counter_new(
+        model="gpt-4o",
+        messages=list(_USER_MESSAGES),
+        tools=tools,
+        tool_choice={"type": "tool", "name": "get_weather"},
+    )
+    openai_named: Final = token_counter_new(
+        model="gpt-4o",
+        messages=list(_USER_MESSAGES),
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    assert anthropic_named == openai_named

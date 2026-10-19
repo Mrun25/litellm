@@ -643,7 +643,17 @@ def _count_tool_choice(
     if tool_choice == "none":
         return 1
     if isinstance(tool_choice, dict):
-        return 7 + count_function(str(tool_choice["function"]["name"]))
+        # OpenAI named-tool shape: {"type": "function", "function": {"name": ...}}
+        function: Final = tool_choice.get("function")
+        if isinstance(function, dict) and "name" in function:
+            return 7 + count_function(str(function["name"]))
+        # Anthropic named-tool shape: {"type": "tool", "name": ...}
+        name: Final = tool_choice.get("name")
+        if isinstance(name, str):
+            return 7 + count_function(name)
+        # Anthropic keyword shapes ({"type": "auto" | "any" | "none"}) name no
+        # tool - count them like the bare "none" string.
+        return 1
     return 0
 
 
