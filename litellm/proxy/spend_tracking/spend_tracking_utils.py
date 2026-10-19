@@ -237,6 +237,7 @@ def _get_spend_logs_metadata(
             vector_store_request_metadata=None,
             model_map_information=None,
             usage_object=None,
+            usage_is_estimated=None,
             guardrail_information=None,
             internal_call_origin=None,
             litellm_roi_estimator=False,

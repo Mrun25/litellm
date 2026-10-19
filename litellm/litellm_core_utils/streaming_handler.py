@@ -2178,6 +2178,14 @@ class CustomStreamWrapper:
                 self._log_stream_failure_and_raise(e)
             return await self._finalize_completed_stream(cache_hit=cache_hit)
         except Exception as e:
+            if self.received_finish_reason is not None and _is_stream_transport_error(e):
+                # The provider delivered its content and finish_reason, then the
+                # connection dropped before the stream terminated (e.g. the
+                # include_usage chunk never arrived). The openai SDK converts the
+                # mid-body reset to openai.APIConnectionError, which bypasses the
+                # httpx.ReadError branch above - finalize gracefully instead of
+                # erroring a stream the caller already received in full.
+                return await self._finalize_completed_stream(cache_hit=cache_hit)
             await self.aclose()
             self._log_stream_failure_and_raise(e)
 
@@ -2215,6 +2223,7 @@ class CustomStreamWrapper:
                     "usage",
                     getattr(complete_streaming_response, "usage"),
                 )
+                self._flag_estimated_usage_if_missing(complete_streaming_response)
                 _stamp_served_service_tier(response, complete_streaming_response)
                 try:
                     _copy = complete_streaming_response.model_copy(deep=True)
@@ -2294,6 +2303,41 @@ class CustomStreamWrapper:
             # cleaned up on the next __anext__() call; one that stops here
             # relies on aclose() or the best-effort __del__ guard.
             return processed_chunk
+
+    def _flag_estimated_usage_if_missing(self, complete_streaming_response: "ModelResponse") -> None:
+        """
+        When usage was requested (stream_options.include_usage) but no provider
+        usage chunk arrived - e.g. the connection dropped between the finish
+        chunk and the usage chunk - the usage on the final response is a local
+        token_counter estimate. Mark it and warn, so operators and clients do
+        not mistake it for provider-reported usage (cached prompt tokens would
+        otherwise be billed at the full uncached rate).
+        """
+        if self.send_stream_usage is not True:
+            return
+        provider_usage_reported: Final = any(
+            (getattr(chunk, "usage", None) if not isinstance(chunk, dict) else chunk.get("usage")) is not None
+            for chunk in self.chunks
+        )
+        if provider_usage_reported:
+            return
+        # The logging layer rebuilds the complete streaming response from its
+        # own recorded chunks, so mark the logging object itself; litellm_logging
+        # transfers the flag onto the rebuilt response's hidden params.
+        if self.logging_obj is not None:
+            self.logging_obj.streaming_usage_is_estimated = True
+        hidden_params: Final = getattr(complete_streaming_response, HIDDEN_PARAMS_ATTR, None)
+        if isinstance(hidden_params, dict):
+            hidden_params["usage_is_estimated"] = True
+        if getattr(self, "_estimated_usage_warned", False):
+            return  # _finalize_completed_stream can run twice for one stream
+        self._estimated_usage_warned = True
+        verbose_logger.warning(
+            "Stream ended without the provider's usage chunk although include_usage was requested "
+            "(model=%s, litellm_call_id=%s): logged usage is a local estimate, not provider-reported.",
+            self.model,
+            getattr(self.logging_obj, "litellm_call_id", None),
+        )
 
     def _log_stream_failure_and_raise(self, e: Exception) -> NoReturn:
         traceback_exception: Final = traceback.format_exc()
@@ -2555,6 +2599,29 @@ def _coerce_token_details(
     if isinstance(raw, details_type):
         return raw
     return details_type(**(raw if isinstance(raw, dict) else raw.model_dump()))
+
+
+def _is_stream_transport_error(e: BaseException) -> bool:
+    """
+    True for connection-level errors a cut stream surfaces as, whichever layer
+    wrapped them: httpx transport errors (ReadError/RemoteProtocolError), the
+    openai SDK's APIConnectionError (its streaming layer converts the httpx
+    error before CustomStreamWrapper can see it), or a litellm exception whose
+    original_exception is one of those.
+    """
+    if isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError)):
+        return True
+    try:
+        import openai
+
+        if isinstance(e, openai.APIConnectionError):
+            return True
+    except ImportError:
+        pass
+    original: Final = getattr(e, "original_exception", None)
+    if original is not None and original is not e:
+        return _is_stream_transport_error(original)
+    return False
 
 
 def calculate_total_usage(chunks: list[ModelResponse]) -> Usage:

@@ -3639,6 +3639,10 @@ class Logging(LiteLLMLoggingBaseClass):
         if complete_streaming_response is not None:
             print_verbose("Async success callbacks: Got a complete streaming response")
 
+            if getattr(self, "streaming_usage_is_estimated", False):
+                _hparams = getattr(complete_streaming_response, HIDDEN_PARAMS_ATTR, None)
+                if isinstance(_hparams, dict):
+                    _hparams["usage_is_estimated"] = True
             self.model_call_details["async_complete_streaming_response"] = complete_streaming_response
             self._surface_response_headers_from_result(complete_streaming_response)
 
@@ -6545,6 +6549,7 @@ class StandardLoggingPayloadSetup:
             batch_failed_requests=None,
             litellm_model_name=None,
             usage_object=None,
+            usage_is_estimated=None,
         )
         if hidden_params is not None:
             for key in StandardLoggingHiddenParams.__annotations__:
@@ -6983,6 +6988,7 @@ def _extract_response_obj_and_hidden_params(
                     batch_failed_requests=None,
                     litellm_model_name=None,
                     usage_object=None,
+                    usage_is_estimated=None,
                 )
             )
 
@@ -7400,6 +7406,7 @@ def get_standard_logging_metadata(
         vector_store_request_metadata=None,
         routing_decision=None,
         usage_object=None,
+        usage_is_estimated=None,
         requester_custom_headers=None,
         user_api_key_request_route=None,
         cold_storage_object_key=None,
@@ -7493,6 +7500,7 @@ def create_dummy_standard_logging_payload() -> StandardLoggingPayload:
         batch_failed_requests=None,
         litellm_model_name=None,
         usage_object=None,
+        usage_is_estimated=None,
     )
 
     # Convert numeric values to appropriate types

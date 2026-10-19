@@ -4307,6 +4307,117 @@ async def test_transport_read_error_after_finish_reason_ends_stream_gracefully(
 
 
 @pytest.mark.asyncio
+async def test_openai_connection_error_after_finish_reason_ends_stream_gracefully(
+    logging_obj: Logging,
+):
+    """The openai SDK converts a post-finish mid-body reset into
+    openai.APIConnectionError; it must still end the stream gracefully,
+    like the raw httpx.ReadError does."""
+    import httpx
+    import openai
+
+    completion_stream = TransportErrorAfterChunksIterator(
+        model_responses=[
+            _reset_test_chunk(content="Hello"),
+            _reset_test_chunk(finish_reason="stop"),
+        ],
+        exception=openai.APIConnectionError(
+            message="Connection error.",
+            request=httpx.Request("POST", "http://stub/v1/chat/completions"),
+        ),
+    )
+    response = CustomStreamWrapper(
+        completion_stream=completion_stream,
+        model="hosted_vllm/stub-model",
+        custom_llm_provider="hosted_vllm",
+        logging_obj=logging_obj,
+    )
+
+    chunks = [chunk async for chunk in response]
+
+    finish_reasons = [
+        chunk.choices[0].finish_reason
+        for chunk in chunks
+        if chunk.choices and chunk.choices[0].finish_reason
+    ]
+    contents = [
+        chunk.choices[0].delta.content
+        for chunk in chunks
+        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content
+    ]
+    assert finish_reasons == ["stop"]
+    assert contents == ["Hello"]
+
+
+@pytest.mark.asyncio
+async def test_usage_marked_estimated_when_usage_chunk_never_arrives(
+    logging_obj: Logging, caplog: pytest.LogCaptureFixture
+):
+    """include_usage requested but the connection dropped before the usage
+    chunk: the estimated usage must not pass silently as provider-reported."""
+    import logging
+
+    import httpx
+
+    completion_stream = TransportErrorAfterChunksIterator(
+        model_responses=[
+            _reset_test_chunk(content="Hello"),
+            _reset_test_chunk(finish_reason="stop"),
+        ],
+        exception=httpx.ReadError("Response payload is not completed"),
+    )
+    response = CustomStreamWrapper(
+        completion_stream=completion_stream,
+        model="hosted_vllm/stub-model",
+        custom_llm_provider="hosted_vllm",
+        logging_obj=logging_obj,
+        stream_options={"include_usage": True},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="LiteLLM"):
+        _ = [chunk async for chunk in response]
+
+    assert "local estimate" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_usage_not_marked_estimated_when_provider_usage_arrives(
+    logging_obj: Logging, caplog: pytest.LogCaptureFixture
+):
+    """A normal include_usage stream whose usage chunk arrives is not flagged."""
+    import logging
+
+    usage_chunk = ModelResponseStream(
+        id="chatcmpl-reset-test",
+        created=1783458104,
+        model="stub-model",
+        object="chat.completion.chunk",
+        choices=[],
+        usage=Usage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+    )
+    completion_stream = TransportErrorAfterChunksIterator(
+        model_responses=[
+            _reset_test_chunk(content="Hello"),
+            _reset_test_chunk(finish_reason="stop"),
+            usage_chunk,
+        ],
+        exception=StopAsyncIteration,
+    )
+    response = CustomStreamWrapper(
+        completion_stream=completion_stream,
+        model="hosted_vllm/stub-model",
+        custom_llm_provider="hosted_vllm",
+        logging_obj=logging_obj,
+        stream_options={"include_usage": True},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="LiteLLM"):
+        _ = [chunk async for chunk in response]
+
+    assert "local estimate" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_transport_read_error_before_finish_reason_raises(logging_obj: Logging):
     """A connection reset before any finish chunk must surface, never end as a clean stop.
 
