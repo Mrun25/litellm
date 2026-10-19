@@ -23,6 +23,21 @@ if TYPE_CHECKING:
     from litellm.litellm_core_utils.tokenizer import Encoding as Tokenizer
 
 
+def _timeout_client_params(timeout: float | httpx.Timeout | None) -> dict:
+    """Client-constructor params carrying an explicit request timeout.
+
+    Returns an empty dict when no usable timeout was given, so the client
+    keeps its default (``httpx.Timeout(None)`` is treated as "not set").
+    """
+    if isinstance(timeout, (int, float)):
+        return {"timeout": httpx.Timeout(timeout)}
+    if isinstance(timeout, httpx.Timeout) and any(
+        value is not None for value in (timeout.connect, timeout.read, timeout.write, timeout.pool)
+    ):
+        return {"timeout": timeout}
+    return {}
+
+
 def validate_environment(api_key, headers: dict):
     # Create a lowercase key lookup to avoid duplicate headers with different cases
     # This is important when headers come from AWS signed requests (which use Title-Case)
@@ -164,7 +179,7 @@ def embedding(
 
     ## COMPLETION CALL
     if client is None or not isinstance(client, HTTPHandler):
-        client = HTTPHandler(concurrent_limit=1)
+        client = HTTPHandler(concurrent_limit=1, **_timeout_client_params(timeout))
 
     response: Final = client.post(embed_url, headers=headers, data=json.dumps(data))
 
