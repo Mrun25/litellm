@@ -203,6 +203,26 @@ def _force_redis_hash_tag_grouping_from_litellm_settings() -> bool:
     return force_redis_hash_tag_grouping is True
 
 
+def _any_window_expired(
+    cache_values: "CacheCounterValues",
+    now_int: int,
+    window_size: int,
+) -> bool:
+    """True when any window/counter pair's window has expired (or has no window
+    start at all - e.g. a stale counter outliving its window), meaning the
+    sliding-window roll would reset its counters."""
+    for i in range(0, len(cache_values), 2):
+        window_start: Final = cache_values[i]
+        if window_start is None:
+            return True
+        try:
+            if now_int - int(window_start) >= window_size:
+                return True
+        except (TypeError, ValueError):
+            return True  # unreadable window start - let the roll rebuild it
+    return False
+
+
 def _sibling_counter_keys(window_key: str) -> tuple[str, str]:
     prefix: Final = window_key.removesuffix(":window")
     return f"{prefix}:requests", f"{prefix}:tokens"
@@ -1691,7 +1711,19 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                 rate_limit_response: Final = self.is_cache_list_over_limit(
                     keys_to_fetch, cache_values, key_metadata, read_only=read_only
                 )
-                if rate_limit_response["overall_code"] == "OVER_LIMIT":
+                # An over-limit in-memory snapshot must not end the check when
+                # a window has expired: this early return is the only path that
+                # skips in_memory_cache_sliding_window, where the window roll
+                # lives. Fall through so the sliding-window pass rolls it and
+                # re-evaluates; otherwise a key over its tpm_limit stays locked
+                # out until the counter's cache TTL happens to expire.
+                if rate_limit_response[
+                    "overall_code"
+                ] == "OVER_LIMIT" and not _any_window_expired(
+                    cache_values=cache_values,
+                    now_int=now_int,
+                    window_size=self.window_size,
+                ):
                     return rate_limit_response
 
             ## IF under limit in-memory, check Redis

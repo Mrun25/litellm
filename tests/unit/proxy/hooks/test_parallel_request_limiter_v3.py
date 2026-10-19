@@ -8566,3 +8566,41 @@ async def test_a2a_url_target_owns_invocation_fee_and_request_limit(
         await _rpm_request(limiter, cache, auth, "a2a/cheap")
     assert denied.value.status_code == 429
     assert "expensive" in str(denied.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_over_limit_key_refills_after_its_window_rolls(monkeypatch: pytest.MonkeyPatch):
+    """Regression for #47340: a key over its tpm_limit must not stay locked out
+    after the window expires. The in-memory pre-check in should_rate_limit used
+    to return OVER_LIMIT early, before in_memory_cache_sliding_window could
+    roll the window, so an over-limit key never refilled until its counter TTL
+    happened to expire."""
+    handler: Final = _PROXY_MaxParallelRequestsHandler(internal_usage_cache=InternalUsageCache(DualCache()))
+    t0: Final = int(time.time())
+    monkeypatch.setattr(handler, "_get_current_time", lambda: datetime.fromtimestamp(t0, tz=timezone.utc))
+    descriptors: Final = [
+        RateLimitDescriptor(
+            key="api_key",
+            value="over-limit-key",
+            rate_limit={"tokens_per_unit": 1000, "window_size": 60},
+        )
+    ]
+    tokens_key: Final = handler.create_rate_limit_keys("api_key", "over-limit-key", "tokens")
+
+    first: Final = await handler.should_rate_limit(descriptors=descriptors)
+    assert first["overall_code"] == "OK"
+
+    # Post-call token increment charges the key past its limit.
+    await handler.async_increment_tokens_with_ttl_preservation(
+        pipeline_operations=[RedisPipelineIncrementOperation(key=tokens_key, increment_value=2000.0)]
+    )
+    over_limit: Final = await handler.should_rate_limit(descriptors=descriptors, read_only=True)
+    assert over_limit["overall_code"] == "OVER_LIMIT"
+
+    # One second past the window, the key must refill instead of staying locked out.
+    monkeypatch.setattr(
+        handler, "_get_current_time", lambda: datetime.fromtimestamp(t0 + 61, tz=timezone.utc)
+    )
+    refilled: Final = await handler.should_rate_limit(descriptors=descriptors)
+    assert refilled["overall_code"] == "OK"
+    assert refilled["statuses"][0]["limit_remaining"] == 999
