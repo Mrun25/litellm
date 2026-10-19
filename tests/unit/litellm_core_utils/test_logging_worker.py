@@ -834,3 +834,53 @@ class TestLoggingWorker:
             assert worker._timeout_burst_count == 0, "stale burst count must reset on loop change"
 
         asyncio.run(rebind_on_second_loop())
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_callback_is_detached_not_cancelled():
+    """Regression for #47374: one slow callback must not cancel the rest of the
+    bundled coroutine - the proxy's spend-log write shares that coroutine, so
+    cancelling it silently drops the spend row. On timeout the worker records
+    the timeout and lets the callback finish detached."""
+    from litellm.litellm_core_utils.logging_worker import LoggingWorker
+
+    completed: list[str] = []
+
+    async def bundled_callback() -> None:
+        await asyncio.sleep(0.6)  # slow custom callback
+        completed.append("spend_write")  # internal spend write, runs last
+
+    worker: Final = LoggingWorker(timeout=0.1)
+    worker.start()
+    assert worker._queue is not None
+    worker.enqueue(bundled_callback())
+
+    await asyncio.sleep(0.3)  # timeout fired, callback still running
+    assert completed == [], "callback should still be running detached"
+    assert worker._timeout_burst_count == 1, "timeout must still be recorded"
+
+    await asyncio.sleep(0.6)  # detached callback completes
+    assert completed == ["spend_write"], "spend write must land despite the timeout"
+
+
+@pytest.mark.asyncio
+async def test_a_detached_callback_failure_is_logged_not_raised():
+    """A callback that fails after being detached reports through the done
+    callback instead of surfacing as an unretrieved task exception."""
+    from unittest.mock import patch
+
+    from litellm.litellm_core_utils.logging_worker import LoggingWorker
+
+    async def failing_callback() -> None:
+        await asyncio.sleep(0.2)
+        raise RuntimeError("boom")
+
+    worker: Final = LoggingWorker(timeout=0.1)
+    worker.start()
+    worker.enqueue(failing_callback())
+
+    with patch.object(LoggingWorker, "_log_detached_callback_failure") as logged:
+        await asyncio.sleep(0.5)
+        assert logged.called, "detached failure must be reported"
+        task = logged.call_args.args[0]
+        assert isinstance(task.exception(), RuntimeError)

@@ -195,12 +195,19 @@ class LoggingWorker:
                 # Run the coroutine in its original context
                 callback_task: Final = self._create_callback_task(task)
                 try:
-                    await asyncio.wait_for(callback_task, timeout=self.timeout)
+                    # Shield the callback from the timeout: one coroutine bundles
+                    # every success callback, including the internal spend/DB write,
+                    # so cancelling it on a slow custom integration silently drops
+                    # the request's spend row. Detach instead - record the timeout,
+                    # release the worker slot, and let the callback finish.
+                    await asyncio.wait_for(asyncio.shield(callback_task), timeout=self.timeout)
                 except asyncio.TimeoutError as e:
-                    if callback_task.cancelled():
-                        self._record_callback_timeout(task["coroutine"])
-                    else:
+                    if callback_task.done():
+                        # the callback itself raised TimeoutError
                         verbose_logger.exception("LoggingWorker error: %s", e)
+                    else:
+                        callback_task.add_done_callback(self._log_detached_callback_failure)
+                        self._record_callback_timeout(task["coroutine"])
                 except Exception as e:
                     verbose_logger.exception("LoggingWorker error: %s", e)
                 finally:
@@ -209,6 +216,21 @@ class LoggingWorker:
         finally:
             # Always release semaphore, even if queue is None
             sem.release()
+
+    @staticmethod
+    def _log_detached_callback_failure(callback_task: "asyncio.Task[object]") -> None:
+        """Log a failure from a timed-out callback left running detached."""
+        try:
+            if callback_task.cancelled():
+                return
+            exception: Final = callback_task.exception()
+        except asyncio.CancelledError:
+            return
+        if exception is not None:
+            verbose_logger.error(
+                "LoggingWorker: detached callback failed after timeout: %s", exception,
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )
 
     def _record_callback_timeout(self, coroutine: Coroutine) -> None:
         """Count a callback timeout and arm a debounced summary, so a burst of timeouts
@@ -443,15 +465,19 @@ class LoggingWorker:
         if self._queue is None:
             return
 
+        callback_task: Final = self._create_callback_task(task)
         try:
             await asyncio.wait_for(
-                self._create_callback_task(task),
+                asyncio.shield(callback_task),
                 timeout=self.timeout,
             )
         except Exception:
             # Suppress errors during processing to ensure we keep going
             pass
         finally:
+            if not callback_task.done():
+                # same detach-on-timeout contract as _process_log_task
+                callback_task.add_done_callback(self._log_detached_callback_failure)
             self._untrack_dequeued(task)
             self._queue.task_done()
 
