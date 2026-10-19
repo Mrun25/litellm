@@ -1114,6 +1114,52 @@ def test_token_counter_with_image_url():
     ), f"Expected detail validation error, got: {e}"
 
 
+def test_token_counter_with_image_url_original_detail():
+    """
+    Test that detail: "original" is accepted by token_counter.
+
+    OpenAI supports "original" alongside "low", "high" and "auto" on image
+    parts; it keeps the image at full resolution, so it is accounted like
+    "high" (tile-based counting) rather than rejected.
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.jpg",
+                        "detail": "original",
+                    },
+                },
+            ],
+        }
+    ]
+
+    # Must not raise; with the default image token count short-circuit on,
+    # both "original" and "high" resolve to the same count.
+    tokens_original = token_counter(
+        model="gpt-3.5-turbo", messages=messages, use_default_image_token_count=True
+    )
+    assert tokens_original > 0
+
+    # Same accounting as "high" for a real (base64) image
+    from litellm.litellm_core_utils.token_counter import (
+        _count_image_tokens,
+    )
+
+    png = _png_data_url(64, 64)
+    original = _count_image_tokens(
+        {"url": png, "detail": "original"}, use_default_image_token_count=False
+    )
+    high = _count_image_tokens(
+        {"url": png, "detail": "high"}, use_default_image_token_count=False
+    )
+    assert original == high
+
+
 def test_token_counter_with_thinking_content():
     """
     Test that _count_content_list() correctly handles Claude's extended thinking content blocks.
