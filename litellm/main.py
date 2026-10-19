@@ -7095,6 +7095,7 @@ def embedding(
                 client=client,
                 extra_headers=headers,
                 drop_params=drop_unsupported_params,
+                timeout=timeout,
             )
 
         elif custom_llm_provider == "vertex_ai":
@@ -7148,6 +7149,7 @@ def embedding(
                     client=client,
                     extra_headers=headers,
                     drop_params=drop_unsupported_params,
+                    timeout=timeout,
                 )
             elif (
                 "image" in optional_params

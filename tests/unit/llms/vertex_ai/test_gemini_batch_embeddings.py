@@ -819,3 +819,42 @@ def test_vertex_drop_params_strips_the_block_keys_embeddings_do_not_take() -> No
     data: Final = json.loads(mock_post.call_args.kwargs["data"])
     assert data["content"]["parts"][0]["video_metadata"] == CLIP_PART_METADATA
     assert "detail" not in mock_post.call_args.kwargs["data"]
+
+
+def test_gemini_embedding_dispatch_forwards_timeout() -> None:
+    """main.embedding() must forward the user timeout to the gemini handler (issue #47300)."""
+    with patch("litellm.main.google_batch_embeddings") as mock_handler:
+        mock_handler.batch_embeddings.return_value = EmbeddingResponse()
+        litellm.embedding(
+            model="gemini/text-embedding-004",
+            input=["hello"],
+            api_key="test-gemini-api-key",
+            timeout=45,
+        )
+
+        mock_handler.batch_embeddings.assert_called_once()
+        timeout_param = mock_handler.batch_embeddings.call_args.kwargs["timeout"]
+        if isinstance(timeout_param, httpx.Timeout):
+            assert timeout_param.read == 45.0
+        else:
+            assert timeout_param == 45
+
+
+def test_vertex_ai_embedding_dispatch_forwards_timeout() -> None:
+    """main.embedding() must forward the user timeout to the vertex_ai handler (issue #47300)."""
+    with patch("litellm.main.google_batch_embeddings") as mock_handler:
+        mock_handler.batch_embeddings.return_value = EmbeddingResponse()
+        litellm.embedding(
+            model="vertex_ai/gemini-embedding-2-preview",
+            input=["hello"],
+            vertex_project="test-project",
+            vertex_location="us-central1",
+            timeout=45,
+        )
+
+        mock_handler.batch_embeddings.assert_called_once()
+        timeout_param = mock_handler.batch_embeddings.call_args.kwargs["timeout"]
+        if isinstance(timeout_param, httpx.Timeout):
+            assert timeout_param.read == 45.0
+        else:
+            assert timeout_param == 45
