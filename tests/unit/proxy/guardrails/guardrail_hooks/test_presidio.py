@@ -4748,6 +4748,49 @@ async def test_presidio_pii_masking_logging_output_only_no_pre_api_hook():
 
 
 @pytest.mark.asyncio
+async def test_logging_only_hook_masks_copies_not_live_objects():
+    """
+    Regression test for https://github.com/BerriAI/litellm/issues/47605.
+    In logging_only mode, async_logging_hook must mask COPIES for the logging
+    payload and leave the live request messages and the response object (what
+    the client receives) untouched.
+    """
+    pii_masking = OPTIONAL_PresidioPIIMasking(
+        logging_only=True,
+        mock_testing=True,
+        mock_redacted_text=input_b_anonymizer_results,
+    )
+
+    original_content = "My name is Jane Doe, who are you? Say my name in your response"
+    request_messages = [{"role": "user", "content": original_content}]
+    kwargs = {"messages": request_messages}
+    response = ModelResponse(
+        id="chatcmpl-test",
+        created=0,
+        model="echo-model",
+        choices=[
+            Choices(
+                index=0,
+                finish_reason="stop",
+                message=Message(role="assistant", content=original_content),
+            )
+        ],
+    )
+
+    new_kwargs, new_result = await pii_masking.async_logging_hook(
+        kwargs=kwargs, result=response, call_type="acompletion"
+    )
+
+    # the logging payload is masked
+    assert new_kwargs["messages"][0]["content"] != original_content
+    assert new_result.choices[0].message.content != original_content
+
+    # the live objects held by the caller and returned to the client are untouched
+    assert request_messages[0]["content"] == original_content
+    assert response.choices[0].message.content == original_content
+
+
+@pytest.mark.asyncio
 async def test_presidio_language_configuration():
     """Test that presidio_language parameter is properly set and used in analyze requests"""
     litellm.turn_on_debug()

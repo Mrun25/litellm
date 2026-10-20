@@ -9,6 +9,7 @@
 
 
 import asyncio
+import copy
 import json
 import re
 import threading
@@ -1192,6 +1193,10 @@ class _OPTIONAL_PresidioPIIMasking(CustomGuardrail):
         Masks the input and output before logging to langfuse, datadog, etc.
         """
         if call_type == "completion" or call_type == "acompletion":  # /chat/completions requests
+            # Mask COPIES only. `kwargs["messages"]` and `result` are the live
+            # objects: the request message dicts can be the caller's own dicts,
+            # and `result` is the response object the client receives. Masking
+            # them in place would leak logging_only masking to the client (#47605).
             messages: Final[list | None] = kwargs.get("messages", None)
             tasks: Final = []
             task_mappings: list[tuple[int, int | None]] = []  # Track (message_index, content_index) for each task
@@ -1232,29 +1237,33 @@ class _OPTIONAL_PresidioPIIMasking(CustomGuardrail):
 
             responses: Final = await asyncio.gather(*tasks)
 
+            masked_messages = copy.deepcopy(messages)
+
             # Map responses back to the correct message and content item
             for task_idx, r in enumerate(responses):
                 mapping = task_mappings[task_idx]
                 msg_idx = cast(int, mapping[0])
                 content_idx_optional = cast(int | None, mapping[1])
-                content = messages[msg_idx].get("content", None)
+                content = masked_messages[msg_idx].get("content", None)
                 if content is None:
                     continue
                 if isinstance(content, str) and content_idx_optional is None:
-                    messages[msg_idx]["content"] = r  # replace content with redacted string
+                    masked_messages[msg_idx]["content"] = r  # replace content with redacted string
                 elif isinstance(content, list) and content_idx_optional is not None:
-                    messages[msg_idx]["content"][content_idx_optional]["text"] = r
+                    masked_messages[msg_idx]["content"][content_idx_optional]["text"] = r
 
-            verbose_proxy_logger.debug("Presidio PII Masking: Redacted pii message: %s", messages)
-            kwargs["messages"] = messages
+            verbose_proxy_logger.debug("Presidio PII Masking: Redacted pii message: %s", masked_messages)
+            kwargs["messages"] = masked_messages
 
             if (
                 isinstance(result, ModelResponse)
                 and result.choices
                 and not isinstance(result.choices[0], StreamingChoices)
             ):
+                result = copy.deepcopy(result)
                 await self._process_response_for_pii(response=result, request_data=kwargs, mode="mask")
             elif isinstance(result, dict) and self._is_anthropic_message_response(result):
+                result = copy.deepcopy(result)
                 await self._process_anthropic_response_for_pii(
                     response=result,
                     request_data=kwargs,
