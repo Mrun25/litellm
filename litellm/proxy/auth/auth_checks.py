@@ -345,16 +345,6 @@ def _tag_table(repo: _PrismaTableHolder[_PrismaTagRow]) -> _PrismaAuthTable[_Pri
     return repo.table
 
 
-class _PrismaEndUserRow(Protocol):
-    user_id: str
-
-    def dict(self) -> Mapping[str, object]: ...
-
-
-def _end_user_table(repo: _PrismaTableHolder[_PrismaEndUserRow]) -> _PrismaAuthTable[_PrismaEndUserRow]:
-    return repo.table
-
-
 class _PrismaMaxBudgetRow(Protocol):
     @property
     def max_budget(self) -> float | None: ...
@@ -1918,25 +1908,31 @@ async def check_end_user_budget(
 _check_end_user_budget: Final = check_end_user_budget
 
 
-#: Columns whose non-null value makes an end-user row restrict something auth enforces. ``blocked``
-#: is separate: it restricts when true rather than when merely set.
-_RESTRICTED_COLUMNS: Final = ("budget_id", "allowed_model_region", "default_model", "object_permission_id")
+#: Raw-SQL predicate selecting every end-user row that carries a restriction auth enforces:
+#: ``blocked`` when true, each restricted column when set, ``models`` when non-empty.
+#: Written with literals only (no bind parameters) so PostgreSQL can prove it matches the partial
+#: index from migration ``20261020000000_end_user_restricted_partial_index`` even under a generic
+#: prepared plan - a parameterized ``blocked = $1`` would defeat that match. Keep the two
+#: predicates textually identical.
+_RESTRICTED_END_USER_PREDICATE: Final = """(
+    blocked = TRUE
+    OR budget_id IS NOT NULL
+    OR allowed_model_region IS NOT NULL
+    OR default_model IS NOT NULL
+    OR object_permission_id IS NOT NULL
+    OR models <> '{}'
+)"""
+
+#: Only ``user_id`` is read back, so the loader fetches nothing the registry never uses.
+_RESTRICTED_END_USER_IDS_SQL: Final = (
+    'SELECT user_id FROM "LiteLLM_EndUserTable" WHERE '
+    + _RESTRICTED_END_USER_PREDICATE
+    + " ORDER BY user_id ASC LIMIT $1"
+)
 
 
-def _column_is_set(column: str) -> Mapping[str, object]:
-    """``column IS NOT NULL`` as a plain dict, which is the only shape prisma's builder accepts."""
-    return {column: {"not": None}}
-
-
-def _array_is_not_empty(column: str) -> Mapping[str, object]:
-    """``column`` holds at least one element, as a plain dict for prisma's builder."""
-    return {column: {"is_empty": False}}
-
-
-def _restricted_end_user_where() -> Mapping[str, object]:
-    """Prisma filter selecting every end-user row that carries a restriction auth enforces."""
-    restrictions: Final = (*map(_column_is_set, _RESTRICTED_COLUMNS), _array_is_not_empty("models"))
-    return {"OR": [{"blocked": True}, *restrictions]}
+class _RestrictedEndUserIdRow(TypedDict):
+    user_id: str
 
 
 class _RegistryNotCached:
@@ -2066,11 +2062,15 @@ async def _load_end_user_restricted_registry(
     """The set of end-user ids whose ``LiteLLM_EndUserTable`` row carries a restriction."""
 
     async def fetch_ids() -> tuple[str, ...]:
-        restricted_rows: Final = await _end_user_table(EndUserRepository(prisma_client)).find_many(
-            where=_restricted_end_user_where(),
-            take=END_USER_RESTRICTED_REGISTRY_MAX_SIZE + 1,
+        # Raw SQL with the literal predicate above: the partial index only serves this lookup
+        # when the query text matches the index predicate, which prisma's parameterized
+        # find_many cannot guarantee. ``LIMIT`` stays a parameter - it plays no role in the
+        # partial-index match.
+        restricted_rows: Final[Sequence[_RestrictedEndUserIdRow]] = await prisma_client.db.query_raw(  # pyright: ignore[reportAny]  # untyped prisma client
+            _RESTRICTED_END_USER_IDS_SQL,
+            END_USER_RESTRICTED_REGISTRY_MAX_SIZE + 1,
         )
-        return tuple(row.user_id for row in restricted_rows)
+        return tuple(row["user_id"] for row in restricted_rows)
 
     return await _load_bounded_registry(
         cache_key=end_user_restricted_registry_cache_key(),
