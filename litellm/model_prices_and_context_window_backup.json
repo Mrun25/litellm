@@ -4124,7 +4124,7 @@
         ],
         "supports_computer_use": true,
         "supports_function_calling": true,
-        "supports_max_reasoning_effort": false,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": false,
@@ -8358,6 +8358,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/gpt-5.6-sol-2026-07-09": {
@@ -8486,6 +8487,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/gpt-5.6-terra-2026-07-09": {
@@ -8614,6 +8616,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/gpt-5.6-luna-2026-07-09": {
@@ -8714,7 +8717,7 @@
         ],
         "supports_computer_use": true,
         "supports_function_calling": true,
-        "supports_max_reasoning_effort": false,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": false,
@@ -9409,6 +9412,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/us/gpt-5.6-terra": {
@@ -9465,6 +9469,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/us/gpt-5.6-luna": {
@@ -9521,6 +9526,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/us/gpt-6-astra": {
@@ -9557,7 +9563,7 @@
         ],
         "supports_computer_use": true,
         "supports_function_calling": true,
-        "supports_max_reasoning_effort": false,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": false,
@@ -9819,6 +9825,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/eu/gpt-5.6-terra": {
@@ -9875,6 +9882,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/eu/gpt-5.6-luna": {
@@ -9931,6 +9939,7 @@
         "supports_web_search": true,
         "supports_none_reasoning_effort": true,
         "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false
     },
     "azure/gpt-5.5": {
@@ -33820,6 +33829,7 @@
         "supports_parallel_function_calling": true,
         "supports_response_schema": true,
         "supports_vision": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_none_reasoning_effort": true,
         "supports_reasoning": true,
@@ -33840,6 +33850,7 @@
         "supports_parallel_function_calling": true,
         "supports_response_schema": true,
         "supports_vision": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_none_reasoning_effort": true,
         "supports_reasoning": true,
@@ -33860,6 +33871,7 @@
         "supports_parallel_function_calling": true,
         "supports_response_schema": true,
         "supports_vision": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_none_reasoning_effort": true,
         "supports_reasoning": true,
@@ -37079,6 +37091,7 @@
         ],
         "supports_computer_use": true,
         "supports_function_calling": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": true,
@@ -37154,6 +37167,7 @@
             "text"
         ],
         "supports_function_calling": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": true,
@@ -37229,6 +37243,7 @@
             "text"
         ],
         "supports_function_calling": true,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": true,
@@ -70354,7 +70369,7 @@
         ],
         "supports_computer_use": true,
         "supports_function_calling": true,
-        "supports_max_reasoning_effort": false,
+        "supports_max_reasoning_effort": true,
         "supports_minimal_reasoning_effort": false,
         "supports_native_streaming": true,
         "supports_none_reasoning_effort": false,
