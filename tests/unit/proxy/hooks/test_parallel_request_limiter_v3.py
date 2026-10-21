@@ -3,10 +3,14 @@ Unit Tests for the max parallel request limiter v3 for the proxy
 """
 
 import asyncio
+import base64
 import contextvars
 import logging
+import random
+import struct
 import sys
 import time
+import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -8933,3 +8937,160 @@ async def test_a_successful_extraction_counts_its_input_tokens_toward_the_key_tp
             call_type="aextraction",
         )
     assert refused.value.status_code == 429
+
+
+def _seeded_png_data_url_47828(width: int = 1024, height: int = 1024, seed: int = 0) -> str:
+    """Build a valid PNG fully in memory: no fixtures on disk, no network."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack("!I", len(data))
+            + kind
+            + data
+            + struct.pack("!I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    rng: Final = random.Random(seed)
+    raw: Final = b"".join(b"\x00" + rng.randbytes(width * 3) for _ in range(height))
+    png: Final = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack("!2I5B", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def test_chat_base64_image_blocks_count_toward_tpm_reservation():
+    """#47828: a chat message carrying a 1024x1024 base64 PNG reserved only
+    its caption's tokens before this fix; the media block now gets a bounded
+    tile-based estimate."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = {
+        "model": "synthetic-test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {"type": "image_url", "image_url": {"url": _seeded_png_data_url_47828(), "detail": "high"}},
+                ],
+            }
+        ],
+    }
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+    )
+
+    # 765 tokens (high-detail 1024x1024) + the caption, not ~5 tokens and not
+    # the ~1M chars of the base64 payload
+    assert 700 < estimated_input < 1_000
+
+
+def test_chat_media_blocks_do_not_change_text_weight():
+    """The caption keeps its exact historical str() weight when media blocks
+    are present."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+
+    def estimate(content: list) -> int:
+        data: Final = {"model": "synthetic-test-model", "messages": [{"role": "user", "content": content}]}
+        estimated_input, _ = handler._estimate_input_and_output_tokens(
+            data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+        )
+        return estimated_input
+
+    text_block: Final = {"type": "text", "text": "t" * 4000}
+    image_block: Final = {
+        "type": "image_url",
+        "image_url": {"url": _seeded_png_data_url_47828(), "detail": "high"},
+    }
+    assert estimate([text_block, image_block]) - estimate([image_block]) == 4000 // 4
+
+
+def test_chat_remote_image_url_gets_flat_default_count():
+    """Remote image URLs are never fetched on the reservation path; they get
+    the same flat default the token_counter path uses."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = {
+        "model": "synthetic-test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/i.png"}},
+                ],
+            }
+        ],
+    }
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+    )
+
+    # 250 (DEFAULT_IMAGE_TOKEN_COUNT) + 1 (4-char caption)
+    assert estimated_input == 251
+
+
+def test_chat_input_audio_block_counts_by_decoded_size():
+    """An input_audio block contributes its byte-count estimate instead of 0."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = {
+        "model": "synthetic-test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": "A" * 1_600_000, "format": "wav"}},
+                ],
+            }
+        ],
+    }
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+    )
+
+    # 1.6M base64 chars -> 1.2M bytes -> 750 tokens at 1600 bytes/token
+    assert estimated_input == 750
+
+
+def test_chat_corrupt_base64_image_uses_flat_fallback():
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = {
+        "model": "synthetic-test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}},
+                ],
+            }
+        ],
+    }
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+    )
+
+    assert 0 < estimated_input <= 765
+
+
+def test_chat_text_only_messages_unchanged():
+    """No media blocks: the estimate is exactly the historical one."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = {
+        "model": "synthetic-test-model",
+        "messages": [
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hello world"},
+        ],
+    }
+
+    estimated_input, reserved_output = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="acompletion"
+    )
+
+    assert estimated_input == max(1, len("you are helpfulhello world") // 4)
+    assert reserved_output == 1024

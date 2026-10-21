@@ -10,6 +10,7 @@ import itertools
 import json
 import logging
 import os
+import struct
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence, Set
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from typing import (
     Protocol,
     TypeAlias,
     TypedDict,
+    cast,
 )
 
 from fastapi import HTTPException
@@ -42,14 +44,18 @@ from litellm.caching.redis_batch import (
     active_request_redis_batch,
 )
 from litellm.caching.redis_cache import log_redis_failure
-from litellm.constants import DYNAMIC_RATE_LIMIT_ERROR_THRESHOLD_PER_MINUTE, INTERNAL_CALL_ORIGIN_METADATA_KEY
+from litellm.constants import (
+    DEFAULT_IMAGE_TOKEN_COUNT,
+    DYNAMIC_RATE_LIMIT_ERROR_THRESHOLD_PER_MINUTE,
+    INTERNAL_CALL_ORIGIN_METADATA_KEY,
+)
 from litellm.cost_calculator import get_usage_object
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     get_str_from_messages,
 )
 from litellm.litellm_core_utils.ptu_pricing import is_ptu_cost_attribution_enabled
-from litellm.litellm_core_utils.token_counter import offload_token_count
+from litellm.litellm_core_utils.token_counter import calculate_img_tokens, offload_token_count
 from litellm.llms.azure.ptu_capacity import normalized_tokens
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.auth.auth_utils import (
@@ -846,6 +852,50 @@ def _parse_output_cap_value(raw_value: object) -> int | None:
         return None
 
 
+# A base64 image payload inside a chat message content block must not count
+# at its transport-encoded length, and ``get_str_from_messages`` drops media
+# blocks entirely - so without a bounded per-block budget a multimodal chat
+# request reserves only its caption's tokens (#47828). Each image block is
+# priced with the repo's model-aware tile estimate; each audio block uses
+# the byte-count estimate shared with the precise reservation path.
+_BASE64_DATA_URL_PREFIX: Final = "data:"
+# Flat per-image budget when a base64 payload's dimensions cannot be parsed
+# locally: priced like a high-detail 1024x1024 image under OpenAI tile
+# pricing (85 base + 170 * 4 tiles).
+_FALLBACK_BASE64_IMAGE_TOKENS: Final = 765
+
+
+def _bounded_base64_image_tokens(url: str, detail: object) -> int:
+    """Model-aware token estimate for one base64 image block.
+
+    Only data URLs reach this helper, so dimension lookup decodes the local
+    payload header and never performs network I/O on the reservation path.
+    """
+    mode: Final = cast(Literal["low", "high", "auto"], detail) if detail in ("low", "high", "auto") else "auto"
+    try:
+        return calculate_img_tokens(data=url, mode=mode)
+    except (ValueError, IndexError, struct.error):
+        return _FALLBACK_BASE64_IMAGE_TOKENS
+
+
+def _message_image_block_tokens(block: Mapping[str, object]) -> int:
+    """Bounded token estimate for one ``image_url`` chat content block."""
+    image_url: Final = block.get("image_url")
+    url_str: Final = image_url.get("url") if isinstance(image_url, Mapping) else image_url
+    detail: Final = (
+        block.get("detail")
+        if block.get("detail") is not None
+        else image_url.get("detail")
+        if isinstance(image_url, Mapping)
+        else None
+    )
+    if isinstance(url_str, str) and url_str.startswith(_BASE64_DATA_URL_PREFIX):
+        return _bounded_base64_image_tokens(url_str, detail)
+    # Remote or missing URL: no fetch on the reservation path - the same
+    # flat count the token_counter path uses for images it does not fetch.
+    return DEFAULT_IMAGE_TOKEN_COUNT
+
+
 class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
     batch_rate_limiter_script: _AsyncLuaScript | None
     batch_counter_read_script: _AsyncLuaScript | None
@@ -1200,6 +1250,28 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         )
         return max(round(normalized), 1)
 
+    @staticmethod
+    def _multimodal_message_media_chars(messages: list) -> int:
+        """Bounded character budget for the media blocks in chat ``messages``.
+
+        ``get_str_from_messages`` keeps only ``text`` fields, so ``image_url``
+        and ``input_audio`` blocks would otherwise contribute nothing to the
+        reservation. Each media block contributes its bounded token estimate
+        expressed in characters; text keeps its historical weight.
+        """
+        extra_tokens: Final = sum(
+            _message_image_block_tokens(block)
+            if block.get("type") == "image_url"
+            else _PROXY_MaxParallelRequestsHandler_v3._estimate_audio_block_tokens(block)
+            for message in messages
+            if isinstance(message, Mapping)
+            for content in (message.get("content"),)
+            if isinstance(content, list)
+            for block in content
+            if isinstance(block, Mapping) and block.get("type") in ("image_url", "input_audio")
+        )
+        return extra_tokens * DEFAULT_CHARS_PER_TOKEN
+
     def _estimate_input_and_output_tokens(
         self,
         data: object,
@@ -1254,7 +1326,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         )
 
         total_chars: Final = (
-            len(get_str_from_messages(messages))
+            len(get_str_from_messages(messages)) + self._multimodal_message_media_chars(messages)
             if isinstance(messages, list) and messages
             else len(prompt)
             if isinstance(prompt, str)
