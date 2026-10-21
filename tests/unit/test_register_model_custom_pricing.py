@@ -1704,3 +1704,149 @@ def test_per_request_custom_pricing_scopes_a_colliding_deployment_id_to_its_prov
     finally:
         _restore_model_cost_entries(model_cost_entries)
         litellm.open_ai_chat_completion_models.intersection_update(openai_models_before)
+
+
+def test_per_request_custom_pricing_skips_unchanged_registration():
+    """Repeated requests with unchanged custom pricing must not invalidate the
+    model-info caches: a no-op rewrite used to flush them on every call (#47725)."""
+    from litellm.main import _register_custom_pricing_for_request
+    from litellm.utils import (
+        _cached_get_model_info,
+        _rebuild_model_cost_lowercase_map,
+        get_model_cost_mutation_generation,
+    )
+
+    deployment_id: Final = "static-deployment-47725"
+    shared_key: Final = "openai/mock_provider_llm_47725"
+    kwargs: Final = {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000002,
+        "litellm_metadata": {"model_info": {"id": deployment_id}},
+    }
+    model_cost_entries: Final = _snapshot_model_cost_entries((deployment_id, shared_key))
+    try:
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+        assert litellm.model_cost[deployment_id]["input_cost_per_token"] == 0.000001
+
+        # Warm the caches the request path relies on.
+        _cached_get_model_info("gpt-4o", "openai")
+        _rebuild_model_cost_lowercase_map()
+        generation_before: Final = get_model_cost_mutation_generation()
+        cache_size_before: Final = _cached_get_model_info.cache_info().currsize
+
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+
+        assert get_model_cost_mutation_generation() == generation_before
+        assert _cached_get_model_info.cache_info().currsize == cache_size_before
+        assert litellm.utils._model_cost_lowercase_map is not None
+    finally:
+        _restore_model_cost_entries(model_cost_entries)
+
+
+def test_per_request_custom_pricing_registers_a_real_price_change():
+    """The unchanged-registration skip must not swallow an actual price change."""
+    from litellm.main import _register_custom_pricing_for_request
+    from litellm.utils import get_model_cost_mutation_generation
+
+    deployment_id: Final = "static-deployment-47725-change"
+    shared_key: Final = "openai/mock_provider_llm_47725_change"
+    base_kwargs: Final = {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000002,
+        "litellm_metadata": {"model_info": {"id": deployment_id}},
+    }
+    model_cost_entries: Final = _snapshot_model_cost_entries((deployment_id, shared_key))
+    try:
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_change",
+            custom_llm_provider="openai",
+            kwargs=base_kwargs,
+            model_info=None,
+        )
+        generation_before: Final = get_model_cost_mutation_generation()
+
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_change",
+            custom_llm_provider="openai",
+            kwargs={**base_kwargs, "output_cost_per_token": 0.000009},
+            model_info=None,
+        )
+
+        assert get_model_cost_mutation_generation() > generation_before
+        assert litellm.model_cost[deployment_id]["output_cost_per_token"] == 0.000009
+        assert litellm.model_cost[deployment_id]["input_cost_per_token"] == 0.000001
+    finally:
+        _restore_model_cost_entries(model_cost_entries)
+
+
+def test_per_request_custom_pricing_reregisters_after_the_row_is_dropped():
+    """A cost-map reload drops non-persisted rows; the next request must register
+    again instead of trusting the skip check."""
+    from litellm.main import _register_custom_pricing_for_request
+
+    deployment_id: Final = "static-deployment-47725-reload"
+    shared_key: Final = "openai/mock_provider_llm_47725_reload"
+    kwargs: Final = {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000002,
+        "litellm_metadata": {"model_info": {"id": deployment_id}},
+    }
+    model_cost_entries: Final = _snapshot_model_cost_entries((deployment_id, shared_key))
+    try:
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_reload",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+        litellm.model_cost.pop(deployment_id, None)  # a reload replaces the map without the row
+
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_reload",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+
+        assert litellm.model_cost[deployment_id]["input_cost_per_token"] == 0.000001
+    finally:
+        _restore_model_cost_entries(model_cost_entries)
+
+
+def test_per_request_custom_pricing_skips_unchanged_registration_without_router():
+    """Direct SDK calls (no router deployment id) get the same unchanged-skip."""
+    from litellm.main import _register_custom_pricing_for_request
+    from litellm.utils import get_model_cost_mutation_generation
+
+    shared_key: Final = "openai/mock_provider_llm_47725_direct"
+    kwargs: Final = {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.000002}
+    model_cost_entries: Final = _snapshot_model_cost_entries((shared_key,))
+    try:
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_direct",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+        generation_before: Final = get_model_cost_mutation_generation()
+
+        _register_custom_pricing_for_request(
+            model="mock_provider_llm_47725_direct",
+            custom_llm_provider="openai",
+            kwargs=kwargs,
+            model_info=None,
+        )
+
+        assert get_model_cost_mutation_generation() == generation_before
+    finally:
+        _restore_model_cost_entries(model_cost_entries)

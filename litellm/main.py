@@ -1263,6 +1263,21 @@ def _get_router_deployment_id(kwargs: dict) -> str | None:
     return None
 
 
+def _custom_pricing_registration_current(key: str, registration: Mapping[str, object]) -> bool:
+    """True when rewriting ``registration`` onto ``litellm.model_cost[key]`` changes nothing.
+
+    register_model() merges each registration field over the stored row, so a repeat
+    write of the same values is a no-op apart from the model-info cache invalidation
+    it triggers on every request. Skipping the rewrite keeps repeated requests with
+    unchanged pricing from flushing those caches, while a real price change or a
+    cost-map reload (which drops the row) still registers normally.
+    """
+    existing = litellm.model_cost.get(key)
+    if not isinstance(existing, dict):
+        return False
+    return all(existing.get(field) == value for field, value in registration.items())
+
+
 def _register_custom_pricing_for_request(
     model: str,
     custom_llm_provider: str,
@@ -1289,11 +1304,18 @@ def _register_custom_pricing_for_request(
     shared_key: Final = f"{custom_llm_provider}/{model}"
     deployment_id: Final = _get_router_deployment_id(kwargs)
     if deployment_id is None:
-        litellm.register_model({shared_key: keep_registered_mode(shared_key, entry)}, persist_across_reloads=False)
+        registration: Final = keep_registered_mode(shared_key, entry)
+        if _custom_pricing_registration_current(shared_key, registration):
+            return
+        litellm.register_model({shared_key: registration}, persist_across_reloads=False)
         return
     shared_entry: Final = keep_registered_mode(
         shared_key, CustomPricingLiteLLMParams.strip_custom_pricing_fields(entry)
     )
+    if _custom_pricing_registration_current(deployment_id, entry) and _custom_pricing_registration_current(
+        shared_key, shared_entry
+    ):
+        return
     litellm.register_model(
         {deployment_id: entry},
         persist_across_reloads=False,
