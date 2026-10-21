@@ -303,6 +303,16 @@ def _litellm_proxy_response(
     )
 
 
+def _extract_provider_request_id(error_obj: "_ProviderHTTPException") -> str | None:
+    """Provider request id from the top level of the error body, if present."""
+    body: Final = getattr(error_obj, "body", None)
+    if isinstance(body, dict):
+        request_id: Final = body.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            return request_id
+    return None
+
+
 def _map_openai_exception(
     *,
     model: str,
@@ -339,6 +349,12 @@ def _map_openai_exception(
             "openai.OpenAIError",
             f"{custom_llm_provider}.{custom_llm_provider}Error",
         )
+    if custom_llm_provider == "dashscope" and message is not None:
+        # DashScope returns its request_id as a sibling of `error`, so the short
+        # extracted message loses the ID users need for provider support tickets.
+        dashscope_request_id: Final = _extract_provider_request_id(original_exception)
+        if dashscope_request_id and dashscope_request_id not in message:
+            message = f"{message} (request_id: {dashscope_request_id})"
     if custom_llm_provider == "openai":
         exception_provider = "OpenAI" + "Exception"
     else:

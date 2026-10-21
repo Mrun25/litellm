@@ -2801,3 +2801,71 @@ def test_transport_timeout_maps_to_timeout(
 
     assert exc_info.value.status_code == 408
     assert f"Request timed out. Error_str: {reason}" in str(exc_info.value)
+
+
+def _dashscope_auth_error(body: dict) -> openai.AuthenticationError:
+    request = httpx.Request(
+        "POST", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    )
+    response = httpx.Response(401, json=body, request=request)
+    return openai.AuthenticationError(
+        message=f"Error code: 401 - {body}", response=response, body=body
+    )
+
+
+def test_dashscope_error_message_includes_provider_request_id() -> None:
+    """Regression test for https://github.com/BerriAI/litellm/issues/47839."""
+    body = {
+        "error": {
+            "message": "Incorrect API key provided.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_api_key",
+        },
+        "request_id": "343604ce-3795-9363-8be6-f4aa3f4613ee",
+    }
+    with pytest.raises(litellm.AuthenticationError) as exc_info:
+        raise exception_type(
+            model="dashscope/deepseek-v4-flash",
+            original_exception=_dashscope_auth_error(body),
+            custom_llm_provider="dashscope",
+        )
+    assert "343604ce-3795-9363-8be6-f4aa3f4613ee" in str(exc_info.value)
+    assert "Incorrect API key provided." in str(exc_info.value)
+
+
+def test_dashscope_error_message_unchanged_without_request_id() -> None:
+    body = {
+        "error": {
+            "message": "Incorrect API key provided.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_api_key",
+        }
+    }
+    with pytest.raises(litellm.AuthenticationError) as exc_info:
+        raise exception_type(
+            model="dashscope/deepseek-v4-flash",
+            original_exception=_dashscope_auth_error(body),
+            custom_llm_provider="dashscope",
+        )
+    assert "request_id:" not in str(exc_info.value)
+
+
+def test_other_providers_do_not_get_a_request_id_suffix() -> None:
+    body = {
+        "error": {
+            "message": "Incorrect API key provided.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_api_key",
+        },
+        "request_id": "343604ce-3795-9363-8be6-f4aa3f4613ee",
+    }
+    with pytest.raises(litellm.AuthenticationError) as exc_info:
+        raise exception_type(
+            model="openai/gpt-4o-mini",
+            original_exception=_dashscope_auth_error(body),
+            custom_llm_provider="openai",
+        )
+    assert "343604ce-3795-9363-8be6-f4aa3f4613ee" not in str(exc_info.value)
