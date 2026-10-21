@@ -5603,9 +5603,8 @@ class BaseLLMHTTPHandler:
 
         request: Final = async_httpx_client.client.build_request(
             "GET",
-            prepared.url,
+            HTTPHandler.merge_params_into_url(prepared.url, prepared.params),
             headers=prepared.headers,
-            params=httpx.QueryParams(HTTPHandler.extract_query_params(prepared.url)).merge(prepared.params),
             timeout=USE_CLIENT_DEFAULT if timeout is None else httpx.Timeout(timeout),
         )
         try:

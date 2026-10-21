@@ -739,13 +739,12 @@ class AsyncHTTPHandler:
         # Set follow_redirects to UseClientDefault if None
         _follow_redirects: Final = follow_redirects if follow_redirects is not None else USE_CLIENT_DEFAULT
 
-        params = params or {}
-        params.update(HTTPHandler.extract_query_params(url))
+        merged_url: Final = HTTPHandler.merge_params_into_url(url, params)
 
         if max_response_bytes is not None:
             return await self._get_with_response_limit(
-                url,
-                params=httpx.QueryParams(params),
+                merged_url,
+                params=None,
                 headers=httpx.Headers(headers),
                 max_bytes=max_response_bytes,
                 follow_redirects=self.client.follow_redirects if follow_redirects is None else follow_redirects,
@@ -753,8 +752,7 @@ class AsyncHTTPHandler:
             )
 
         response: Final = await self.client.get(
-            url,
-            params=params,
+            merged_url,
             headers=headers,
             follow_redirects=_follow_redirects,
             timeout=timeout if timeout is not None else USE_CLIENT_DEFAULT,
@@ -765,7 +763,7 @@ class AsyncHTTPHandler:
         self,
         url: str,
         *,
-        params: httpx.QueryParams,
+        params: httpx.QueryParams | None,
         headers: httpx.Headers,
         timeout: httpx.Timeout,
         max_bytes: int,
@@ -1475,18 +1473,33 @@ class HTTPHandler:
     ):
         # Set follow_redirects to UseClientDefault if None
         _follow_redirects: Final = follow_redirects if follow_redirects is not None else USE_CLIENT_DEFAULT
-        params = params or {}
-        params.update(self.extract_query_params(url))
+        merged_url: Final = HTTPHandler.merge_params_into_url(url, params)
 
         response: Final = self.client.get(
-            url,
-            params=params,
+            merged_url,
             headers=headers,
             follow_redirects=_follow_redirects,
             timeout=timeout if timeout is not None else USE_CLIENT_DEFAULT,
         )
 
         return response
+
+    @staticmethod
+    def merge_params_into_url(url: str, params: Mapping[str, Any] | None) -> str:
+        """
+        Return the URL with caller ``params`` appended, leaving its existing query string
+        byte-for-byte intact. Passing ``params=`` to httpx replaces the URL's query and
+        re-encodes it (``%20`` becomes ``+``, blank values are dropped), which invalidates
+        SigV4-presigned URLs (S3 403s on Bedrock image downloads). On a key collision the
+        URL's own value stays first, matching the previous
+        ``params.update(extract_query_params(url))`` precedence.
+        """
+        if not params:
+            return url
+        from urllib.parse import urlsplit
+
+        separator: Final = "&" if urlsplit(url).query else "?"
+        return f"{url}{separator}{httpx.QueryParams(params)}"
 
     @staticmethod
     def extract_query_params(url: str) -> dict[str, str]:

@@ -2172,3 +2172,58 @@ async def test_async_ollama_ssl_verify_false_builds_a_client_that_skips_certific
     assert route.call_count == 1
     assert text == "Sunny"
     assert _cached_clients_verify_modes(client_cache, AsyncHTTPHandler) == (ssl.CERT_NONE,)
+
+
+_PRESIGNED_URL: Final = (
+    "https://my-bucket.s3.us-east-1.amazonaws.com/img.png"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc123"
+    "&response-content-disposition=attachment%3B%20filename%3Dimg.png"
+    "&response-content-language="
+)
+
+
+def _capture_transport(captured: dict) -> httpx.MockTransport:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, content=b"img")
+
+    return httpx.MockTransport(_handler)
+
+
+def test_get_preserves_presigned_url_query_byte_for_byte():
+    """A SigV4-presigned URL must reach the server exactly as signed: re-encoding
+    (%20 -> +) or dropping blank values invalidates the signature (S3 403s)."""
+    captured: dict = {}
+    handler = HTTPHandler(client=httpx.Client(transport=_capture_transport(captured)))
+    handler.get(_PRESIGNED_URL)
+    assert captured["url"] == _PRESIGNED_URL
+
+
+def test_get_appends_caller_params_after_the_urls_own_query():
+    captured: dict = {}
+    handler = HTTPHandler(client=httpx.Client(transport=_capture_transport(captured)))
+    handler.get(_PRESIGNED_URL, params={"x-extra": "1"})
+    assert captured["url"] == _PRESIGNED_URL + "&x-extra=1"
+
+
+def test_get_adds_caller_params_when_the_url_has_no_query():
+    captured: dict = {}
+    handler = HTTPHandler(client=httpx.Client(transport=_capture_transport(captured)))
+    handler.get("https://example.com/img.png", params={"width": "100"})
+    assert captured["url"] == "https://example.com/img.png?width=100"
+
+
+@pytest.mark.asyncio
+async def test_async_get_preserves_presigned_url_query_byte_for_byte():
+    captured: dict = {}
+    handler = AsyncHTTPHandler(transport=_capture_transport(captured))
+    await handler.get(_PRESIGNED_URL)
+    assert captured["url"] == _PRESIGNED_URL
+
+
+@pytest.mark.asyncio
+async def test_async_get_with_response_limit_preserves_presigned_url():
+    captured: dict = {}
+    handler = AsyncHTTPHandler(transport=_capture_transport(captured))
+    await handler.get(_PRESIGNED_URL, max_response_bytes=10)
+    assert captured["url"] == _PRESIGNED_URL
