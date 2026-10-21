@@ -10537,3 +10537,20 @@ def test_mapped_baggage_tags_keep_non_string_client_tags_as_sent():
     data: Final[dict[str, object]] = {"metadata": {"tags": [1, {"team": "x"}, "client-tag", "client-tag"]}}
     LiteLLMProxyRequestSetup.apply_authenticated_baggage_tags(request, data)
     assert data["metadata"]["tags"] == [1, {"team": "x"}, "client-tag", "client-tag", "tenant:a"]
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["/v1beta/interactions", "/interactions", "/interactions/abc-123"],
+)
+def test_interactions_routes_use_litellm_metadata(route):
+    """Interactions is a provider-native API (like Bedrock or responses): request-scoped
+    tracking lives in ``litellm_metadata`` so the provider-facing ``metadata`` field is
+    untouched and user-supplied fields are recorded in spend logs."""
+    from litellm.proxy.litellm_pre_call_utils import metadata_variable_name_for_route
+
+    assert metadata_variable_name_for_route(route) == "litellm_metadata"
+
+    data: dict[str, object] = {}
+    LiteLLMProxyRequestSetup.pre_seed_litellm_metadata_for_route(request_data=data, route=route)
+    assert data == {"litellm_metadata": {}}
