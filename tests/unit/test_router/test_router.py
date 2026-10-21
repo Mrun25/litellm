@@ -10779,6 +10779,69 @@ def test_access_group_scoped_key_filters_deployments_with_same_public_model():
     assert seen == {"response-via-AG2"}
 
 
+def test_access_group_scoped_key_narrows_team_grants_for_deployment_choice():
+    """
+    A key restricted to one access group inside a team that holds several must
+    not be load-balanced into same-named deployments of the team's other
+    groups: the key's own models list narrows the team's grants.
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "zz-test-same",
+                "litellm_params": {
+                    "model": "openai/gpt-5.1",
+                    "api_key": "key1",
+                    "mock_response": "response-via-AG1",
+                },
+                "model_info": {"access_groups": ["zz-grp-A"]},
+            },
+            {
+                "model_name": "zz-test-same",
+                "litellm_params": {
+                    "model": "openai/gpt-4o",
+                    "api_key": "key2",
+                    "mock_response": "response-via-AG2",
+                },
+                "model_info": {"access_groups": ["zz-grp-B"]},
+            },
+        ]
+    )
+
+    scoped_key = UserAPIKeyAuth(
+        api_key="hashed-key",
+        team_id="team2",
+        models=["zz-grp-A"],
+        team_models=["zz-grp-A", "zz-grp-B"],
+    )
+
+    _model, deployments = router._common_checks_available_deployment(
+        model="zz-test-same",
+        request_kwargs={
+            "metadata": {
+                "user_api_key_team_id": "team2",
+                "user_api_key_auth": scoped_key,
+            }
+        },
+    )
+
+    assert len(deployments) == 1
+    assert deployments[0].get("model_info", {}).get("access_groups") == ["zz-grp-A"]
+
+    seen = set()
+    for _ in range(20):
+        response = router.completion(
+            model="zz-test-same",
+            messages=[{"role": "user", "content": "hello"}],
+            metadata={"user_api_key_team_id": "team2", "user_api_key_auth": scoped_key},
+        )
+        seen.add(response.choices[0].message.content)
+
+    assert seen == {"response-via-AG1"}
+
+
 def test_explicit_model_access_does_not_force_access_group_filtering():
     """
     If a key has explicit model access in addition to access group entries,

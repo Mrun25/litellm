@@ -14723,7 +14723,12 @@ class Router:
 
         object_models: Final = set(getattr(user_api_key_auth, "models", []) or [])
         object_team_models: Final = set(getattr(user_api_key_auth, "team_models", []) or [])
-        allowed_models: Final = object_models | object_team_models
+        # A key's own models list narrows its team's: auth enforces each level
+        # independently (enforced_model_allowlists), so unioning them here would
+        # re-widen a key restricted to one access group into every group its team
+        # holds, leaking same-named deployments of the other groups. The team's
+        # grants apply only when the key carries no models of its own.
+        allowed_models: Final = object_models if object_models else object_team_models
         if not allowed_models:
             return healthy_deployments
 
