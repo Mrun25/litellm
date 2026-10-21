@@ -10,6 +10,7 @@ import itertools
 import json
 import logging
 import os
+import struct
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence, Set
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from typing import (
     Protocol,
     TypeAlias,
     TypedDict,
+    cast,
 )
 
 from fastapi import HTTPException
@@ -49,7 +51,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     get_str_from_messages,
 )
 from litellm.litellm_core_utils.ptu_pricing import is_ptu_cost_attribution_enabled
-from litellm.litellm_core_utils.token_counter import offload_token_count
+from litellm.litellm_core_utils.token_counter import calculate_img_tokens, offload_token_count
 from litellm.llms.azure.ptu_capacity import normalized_tokens
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.auth.auth_utils import (
@@ -846,6 +848,75 @@ def _parse_output_cap_value(raw_value: object) -> int | None:
         return None
 
 
+# A base64 image payload inside a structured Responses input item (message
+# content blocks, custom_tool_call_output.output[]) must not count at its
+# transport-encoded length: ~1.33 chars per raw image byte swamps the real
+# prompt text, and the inflated input estimate then doubles into the default
+# output reservation. Each such block is re-priced at a bounded, model-aware
+# token estimate instead.
+_BASE64_DATA_URL_PREFIX: Final = "data:"
+# Flat per-image budget when the payload's dimensions cannot be parsed
+# locally: priced like a high-detail 1024x1024 image under OpenAI tile
+# pricing (85 base + 170 * 4 tiles).
+_FALLBACK_BASE64_IMAGE_TOKENS: Final = 765
+
+
+def _bounded_base64_image_tokens(url: str, detail: object) -> int:
+    """Model-aware token estimate for one base64 image block.
+
+    Only data URLs reach this helper, so dimension lookup decodes the local
+    payload header and never performs network I/O on the reservation path.
+    """
+    mode: Final = cast(Literal["low", "high", "auto"], detail) if detail in ("low", "high", "auto") else "auto"
+    try:
+        return calculate_img_tokens(data=url, mode=mode)
+    except (ValueError, IndexError, struct.error):
+        return _FALLBACK_BASE64_IMAGE_TOKENS
+
+
+def _holds_base64_image_block(value: object) -> bool:
+    if isinstance(value, Mapping):
+        image_url = value.get("image_url")
+        if value.get("type") == "input_image" and image_url is not None:
+            url_str = image_url.get("url") if isinstance(image_url, Mapping) else image_url
+            if isinstance(url_str, str) and url_str.startswith(_BASE64_DATA_URL_PREFIX):
+                return True
+        return any(_holds_base64_image_block(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_base64_image_block(item) for item in value)
+    return False
+
+
+def _reprice_base64_image_blocks(value: object) -> object:
+    """Return ``value`` with every base64 image payload replaced by a
+    placeholder sized to the image's bounded token estimate.
+
+    Non-image content is preserved verbatim, so adjacent text, tool
+    arguments, and tool definitions keep their historical str() weight.
+    """
+    if isinstance(value, Mapping):
+        image_url = value.get("image_url")
+        if value.get("type") == "input_image" and image_url is not None:
+            url_str: Final = image_url.get("url") if isinstance(image_url, Mapping) else image_url
+            if isinstance(url_str, str) and url_str.startswith(_BASE64_DATA_URL_PREFIX):
+                placeholder: Final = " " * (_bounded_base64_image_tokens(url_str, value.get("detail")) * DEFAULT_CHARS_PER_TOKEN)
+                return {
+                    **value,
+                    "image_url": ({**image_url, "url": placeholder} if isinstance(image_url, Mapping) else placeholder),
+                }
+        return {key: _reprice_base64_image_blocks(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_reprice_base64_image_blocks(item) for item in value]
+    return value
+
+
+def _structured_input_item_chars(item: object) -> int:
+    """Character budget for one structured Responses input item."""
+    if not _holds_base64_image_block(item):
+        return len(str(item))
+    return len(str(_reprice_base64_image_blocks(item)))
+
+
 class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
     batch_rate_limiter_script: _AsyncLuaScript | None
     batch_counter_read_script: _AsyncLuaScript | None
@@ -1262,7 +1333,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
             if isinstance(prompt, list)
             else len(input_text)
             if isinstance(input_text, str)
-            else sum(len(str(item)) for item in input_text)
+            else sum(_structured_input_item_chars(item) for item in input_text)
             if isinstance(input_text, list)
             else 0
         )

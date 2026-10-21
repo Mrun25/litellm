@@ -3,10 +3,14 @@ Unit Tests for the max parallel request limiter v3 for the proxy
 """
 
 import asyncio
+import base64
 import contextvars
 import logging
+import random
+import struct
 import sys
 import time
+import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -8933,3 +8937,169 @@ async def test_a_successful_extraction_counts_its_input_tokens_toward_the_key_tp
             call_type="aextraction",
         )
     assert refused.value.status_code == 429
+
+
+def _seeded_png_data_url(width: int = 1024, height: int = 1024, seed: int = 0) -> str:
+    """Build a valid PNG fully in memory: no fixtures on disk, no network."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack("!I", len(data))
+            + kind
+            + data
+            + struct.pack("!I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    rng: Final = random.Random(seed)
+    raw: Final = b"".join(b"\x00" + rng.randbytes(width * 3) for _ in range(height))
+    png: Final = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack("!2I5B", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def _responses_payload_with_tool_output_images(image_url: object, image_count: int = 3) -> dict:
+    """The #47814 shape: structured input_image blocks nested under
+    custom_tool_call_output.output[]."""
+    return {
+        "model": "synthetic-test-model",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the generated test images."}],
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_synthetic",
+                "name": "render_test",
+                "input": "generate test images",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_synthetic",
+                "output": [{"type": "input_text", "text": "Synthetic output only."}]
+                + [{"type": "input_image", "detail": "high", "image_url": image_url} for _ in range(image_count)],
+            },
+        ],
+    }
+
+
+def test_responses_base64_tool_output_images_do_not_inflate_tpm_reservation():
+    """#47814: three 1024x1024 base64 PNGs in a custom tool output estimated
+    ~3.1M input tokens (and doubled into the output reservation) before this
+    fix; bounded per-image estimates keep the total far below a 5M TPM cap."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = _responses_payload_with_tool_output_images(_seeded_png_data_url())
+
+    estimated_input, reserved_output = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+    )
+
+    assert 0 < estimated_input < 5_000
+    assert reserved_output == max(estimated_input, 1024)
+    assert estimated_input + reserved_output < 5_000_000
+
+
+def test_responses_base64_images_preserve_adjacent_text_and_tool_arguments():
+    """Re-pricing the image payload must not change the weight of neighboring
+    text, tool arguments, or tool definitions."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    text_block: Final = {"type": "input_text", "text": "t" * 4000}
+    image_block: Final = {"type": "input_image", "detail": "high", "image_url": _seeded_png_data_url()}
+
+    def estimate(output_blocks: list) -> int:
+        data: Final = {
+            "model": "synthetic-test-model",
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_synthetic",
+                    "output": output_blocks,
+                }
+            ],
+        }
+        estimated_input, _ = handler._estimate_input_and_output_tokens(
+            data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+        )
+        return estimated_input
+
+    # 4000 text chars keep their full str() weight (plus the block's repr
+    # punctuation, which the historical estimator also counted).
+    assert 4000 // 4 <= estimate([text_block, image_block]) - estimate([image_block]) <= 4000 // 4 + 16
+
+
+def test_responses_remote_image_urls_keep_historical_counting():
+    """Only base64 data URLs are re-priced; remote URLs are short strings and
+    looking them up would put network I/O on the reservation path."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    item: Final = {"type": "input_image", "detail": "high", "image_url": "https://example.com/image.png"}
+    data: Final = {"model": "synthetic-test-model", "input": [item]}
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+    )
+
+    assert estimated_input == max(1, len(str(item)) // 4)
+
+
+def test_responses_low_detail_base64_images_use_the_low_estimate():
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    item: Final = {"type": "input_image", "detail": "low", "image_url": _seeded_png_data_url()}
+    data: Final = {"model": "synthetic-test-model", "input": [item]}
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+    )
+
+    # 85 base tokens for detail=low, not the ~1M chars of the payload
+    assert 0 < estimated_input < 200
+
+
+def test_responses_dict_shaped_image_url_is_repriced():
+    """The {"url": ...} mapping form of an image block is re-priced too."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    item: Final = {
+        "type": "input_image",
+        "detail": "high",
+        "image_url": {"url": _seeded_png_data_url()},
+    }
+    data: Final = {"model": "synthetic-test-model", "input": [item]}
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+    )
+
+    assert 0 < estimated_input < 5_000
+
+
+def test_responses_corrupt_base64_image_stays_bounded():
+    """An unparseable multi-MB payload must fall back to a flat bounded budget
+    instead of raw base64 counting or an estimator crash."""
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    item: Final = {"type": "input_image", "detail": "high", "image_url": "data:image/png;base64," + "A" * 4_000_000}
+    data: Final = {"model": "synthetic-test-model", "input": [item]}
+
+    estimated_input, _ = handler._estimate_input_and_output_tokens(
+        data, min_configured_tpm_limit=5_000_000, call_type="aresponses"
+    )
+
+    assert 0 < estimated_input < 1_000
+
+
+def test_responses_configured_output_estimate_survives_base64_repricing():
+    handler = object.__new__(_PROXY_MaxParallelRequestsHandler)
+    data: Final = _responses_payload_with_tool_output_images(_seeded_png_data_url())
+
+    estimated_input, reserved_output = handler._estimate_input_and_output_tokens(
+        data,
+        min_configured_tpm_limit=5_000_000,
+        call_type="aresponses",
+        configured_output_tokens=32768,
+    )
+
+    assert 0 < estimated_input < 5_000
+    assert reserved_output == 32768
