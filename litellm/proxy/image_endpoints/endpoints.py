@@ -96,6 +96,7 @@ async def image_generation(
         add_litellm_data_to_request,
         general_settings,
         llm_router,
+        prisma_client,
         proxy_config,
         proxy_logging_obj,
         user_model,
@@ -131,6 +132,20 @@ async def image_generation(
         # get the actual model name
         if data["model"] in litellm.model_alias_map:
             data["model"] = litellm.model_alias_map[data["model"]]
+
+        # Apply hierarchical router_settings (Key > Team), the same lookup
+        # ProxyBaseLLMRequestProcessing.common_processing_pre_call_logic does
+        # for chat routes. Without this, key/team fallbacks, num_retries,
+        # timeout and model_group_retry_policy are silently dropped on
+        # /v1/images/generations.
+        if llm_router is not None and proxy_config is not None:
+            router_settings = await proxy_config._get_hierarchical_router_settings(
+                user_api_key_dict=user_api_key_dict,
+                prisma_client=prisma_client,
+                proxy_logging_obj=proxy_logging_obj,
+            )
+            if router_settings is not None:
+                data["router_settings_override"] = router_settings
 
         ### CALL HOOKS ### - modify incoming data / reject request before calling the model
         prompt_value: Final = data.get("prompt")

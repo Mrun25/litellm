@@ -410,3 +410,88 @@ async def test_failure_before_the_provider_call_bills_the_callers_litellm_call_i
 
     assert raised.value.headers["x-litellm-call-id"] == call_id
     assert [data["litellm_call_id"] for data in hook_request_data] == [call_id]
+
+
+@pytest.mark.parametrize("route", ["chat", "images"])
+@pytest.mark.parametrize("where", ["key", "config"])
+def test_key_router_settings_fallbacks_apply(monkeypatch, route, where):
+    """Key/team router_settings must apply on /v1/images/generations too.
+
+    Regression test for https://github.com/BerriAI/litellm/issues/47777:
+    image_generation never set router_settings_override, so a key's
+    router_settings.fallbacks were silently dropped on the images route.
+    """
+    import litellm
+    from litellm import CustomLLM, Router
+    from litellm.proxy import proxy_server
+    from litellm.types.utils import ImageObject
+
+    class Upstream(CustomLLM):
+        def __init__(self, fail):
+            super().__init__()
+            self.calls, self.fail = 0, fail
+
+        def _maybe_fail(self):
+            self.calls += 1
+            if self.fail:
+                raise litellm.ServiceUnavailableError("503", model="x", llm_provider="x")
+
+        async def acompletion(self, *args, **kwargs):
+            self._maybe_fail()
+            return litellm.ModelResponse(
+                choices=[{"message": {"role": "assistant", "content": "ok"}}]
+            )
+
+        async def aimage_generation(self, model, prompt, model_response, **kwargs):
+            self._maybe_fail()
+            model_response.data = [ImageObject(url="https://example.com/out.png")]
+            return model_response
+
+    primary, fallback = Upstream(fail=True), Upstream(fail=False)
+    monkeypatch.setattr(
+        litellm,
+        "custom_provider_map",
+        [
+            {"provider": "failing", "custom_handler": primary},
+            {"provider": "ok", "custom_handler": fallback},
+        ],
+    )
+    litellm.utils.custom_llm_setup()
+    edge = [{"A": ["B"]}]
+    monkeypatch.setattr(
+        proxy_server,
+        "llm_router",
+        Router(
+            model_list=[
+                {"model_name": "A", "litellm_params": {"model": "failing/x", "num_retries": 0}},
+                {"model_name": "B", "litellm_params": {"model": "ok/x", "num_retries": 0}},
+            ],
+            num_retries=0,
+            fallbacks=edge if where == "config" else [],
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_server,
+        "proxy_logging_obj",
+        proxy_server.ProxyLogging(user_api_key_cache=proxy_server.user_api_key_cache),
+    )
+
+    key = UserAPIKeyAuth(
+        api_key="sk-test", router_settings={"fallbacks": edge} if where == "key" else None
+    )
+    app = FastAPI()
+    app.include_router(proxy_server.router)
+    app.include_router(endpoints.router)
+    app.add_exception_handler(ProxyException, proxy_server.openai_exception_handler)
+    app.dependency_overrides[proxy_server.user_api_key_auth] = lambda: key
+    app.dependency_overrides[endpoints.user_api_key_auth] = lambda: key
+    client = TestClient(app)
+
+    if route == "chat":
+        r = client.post(
+            "/v1/chat/completions",
+            json={"model": "A", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    else:
+        r = client.post("/v1/images/generations", json={"model": "A", "prompt": "hi"})
+    assert r.status_code == 200 and fallback.calls == 1, r.text
