@@ -60,6 +60,22 @@ def keep_registered_mode(backend_key: str, shared_model_info: Mapping[str, objec
     return {**shared_model_info, "mode": registered_mode}
 
 
+DEPLOYMENT_SCOPED_TOKEN_LIMIT_FIELDS: Final = ("max_tokens", "max_input_tokens", "max_output_tokens")
+
+
+def keep_registered_token_limits(backend_key: str, shared_model_info: Mapping[str, object]) -> Mapping[str, object]:
+    """A deployment's own ``max_tokens``, ``max_input_tokens`` and ``max_output_tokens`` bound only that
+    deployment, so they never replace the limits registered for its shared backend row, which the SDK and
+    every sibling deployment read. A limit the row does not already carry still registers, since that is
+    how a model missing from the cost map gets its deployment's limits; a later deployment of the same
+    model then finds the first registration and leaves it alone."""
+    registered: Final = model_cost_registration_row(backend_key, shared_model_info.get("litellm_provider", ""))
+    strip: Final = {field for field in DEPLOYMENT_SCOPED_TOKEN_LIMIT_FIELDS if registered.get(field) is not None}
+    if not strip or not any(field in shared_model_info for field in strip):
+        return shared_model_info
+    return {key: value for key, value in shared_model_info.items() if key not in strip}
+
+
 _OPENAI_API_HOST: Final = "api.openai.com"
 
 

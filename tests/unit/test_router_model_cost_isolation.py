@@ -648,6 +648,69 @@ def test_token_count_settings_stay_on_the_deployment_that_set_them() -> None:
         _restore_model_cost_entries(model_keys)
 
 
+@pytest.mark.parametrize("field", ["max_tokens", "max_input_tokens", "max_output_tokens"])
+def test_token_limits_stay_on_the_deployment_that_set_them(field: str) -> None:
+    """A deployment's token-limit override must not land on the shared
+    ``{provider}/{model}`` key, or every sibling deployment of that model would inherit it."""
+    backend_model = "bedrock/us.xai.grok-4.6"
+    deploy_id = "grok-deploy-keep-token-limits"
+
+    builtin_limit = litellm.get_model_info(model=backend_model).get(field)
+    assert isinstance(builtin_limit, int)
+    deployment_limit = builtin_limit - 1
+    model_keys = {
+        deploy_id: litellm.model_cost.get(deploy_id),
+        backend_model: copy.deepcopy(litellm.model_cost.get(backend_model)),
+    }
+    try:
+        Router(
+            model_list=[
+                {
+                    "model_name": "grok-keep-token-limits",
+                    "litellm_params": {"model": backend_model},
+                    "model_info": {"id": deploy_id, field: deployment_limit},
+                }
+            ],
+        )
+
+        assert litellm.model_cost[deploy_id][field] == deployment_limit
+        assert litellm.get_model_info(model=backend_model).get(field) == builtin_limit
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
+def test_token_limits_first_registration_wins_for_unlisted_model() -> None:
+    """For a model missing from the cost map, the first deployment's limits register on the
+    shared ``{provider}/{model}`` key (that is how such a model gets limits at all), and a
+    later deployment of the same model cannot overwrite them."""
+    backend_model = "openai/zz-unlisted-model-47829"
+    model_keys = {
+        key: copy.deepcopy(litellm.model_cost.get(key))
+        for key in ("zz-unlisted-dep-a", "zz-unlisted-dep-b", backend_model)
+    }
+    try:
+        Router(
+            model_list=[
+                {
+                    "model_name": "zz-unlisted-a",
+                    "litellm_params": {"model": backend_model, "api_key": "sk-fake"},
+                    "model_info": {"id": "zz-unlisted-dep-a", "max_input_tokens": 4096},
+                },
+                {
+                    "model_name": "zz-unlisted-b",
+                    "litellm_params": {"model": backend_model, "api_key": "sk-fake"},
+                    "model_info": {"id": "zz-unlisted-dep-b", "max_input_tokens": 512},
+                },
+            ],
+        )
+
+        assert litellm.model_cost["zz-unlisted-dep-a"]["max_input_tokens"] == 4096
+        assert litellm.model_cost["zz-unlisted-dep-b"]["max_input_tokens"] == 512
+        assert litellm.model_cost[backend_model]["max_input_tokens"] == 4096
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
 def test_should_store_full_pricing_under_deployment_model_id():
     """
     Per-deployment pricing (including zero) should be stored and

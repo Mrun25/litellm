@@ -145,7 +145,7 @@ from litellm.llms.openai_like.model_info import (
     MODEL_INFO_REFRESH_SECONDS,
     get_openai_compatible_model_info,
 )
-from litellm.responses.bridge_check import keep_registered_mode
+from litellm.responses.bridge_check import keep_registered_mode, keep_registered_token_limits
 from litellm.router_strategy.base_routing_strategy import BaseRoutingStrategy
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
 from litellm.router_strategy.complexity_router.context_compaction import (
@@ -11515,7 +11515,10 @@ class Router:
         # its unique model_id above.
         shared_model_info: Final = shared_backend_model_info(model_info)
         litellm.register_model(
-            model_cost={_key: keep_registered_mode(_key, shared_model_info) for _key in backend_keys},
+            model_cost={
+                _key: keep_registered_token_limits(_key, keep_registered_mode(_key, shared_model_info))
+                for _key in backend_keys
+            },
             persist_across_reloads=False,
         )
 

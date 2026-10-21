@@ -1109,6 +1109,7 @@ from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the o
 from litellm.responses.bridge_check import (
     bridge_reasoning_effort,
     keep_registered_mode,
+    keep_registered_token_limits,
     str_keyed_mapping,
 )
 from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the old definition site
@@ -1291,10 +1292,14 @@ def _register_custom_pricing_for_request(
     shared_key: Final = f"{custom_llm_provider}/{model}"
     deployment_id: Final = _get_router_deployment_id(kwargs)
     if deployment_id is None:
-        litellm.register_model({shared_key: keep_registered_mode(shared_key, entry)}, persist_across_reloads=False)
+        litellm.register_model(
+            {shared_key: keep_registered_token_limits(shared_key, keep_registered_mode(shared_key, entry))},
+            persist_across_reloads=False,
+        )
         return
-    shared_entry: Final = keep_registered_mode(
-        shared_key, CustomPricingLiteLLMParams.strip_custom_pricing_fields(entry)
+    shared_entry: Final = keep_registered_token_limits(
+        shared_key,
+        keep_registered_mode(shared_key, CustomPricingLiteLLMParams.strip_custom_pricing_fields(entry)),
     )
     litellm.register_model(
         {deployment_id: entry},
