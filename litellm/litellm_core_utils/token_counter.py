@@ -414,6 +414,93 @@ class _MessageCountParams:
         self.tool_section = chat_template_tool_section(model)
 
 
+def _tool_change_block_name_and_definition(
+    block: Mapping[str, object],
+) -> tuple[str | None, Mapping[str, object] | None]:
+    """Extract (name, definition) from a tool_addition/tool_removal block's ``tool`` payload.
+
+    A ``tool_definition`` payload carries the full definition; a
+    ``tool_reference`` payload is a name-only pointer, returned with the
+    definition as None.
+    """
+    tool = block.get("tool")
+    if not isinstance(tool, Mapping):
+        return None, None
+    if tool.get("type") == "tool_definition" and isinstance(tool.get("definition"), Mapping):
+        definition = cast(Mapping[str, object], tool["definition"])
+        name = definition.get("name")
+        return (name if isinstance(name, str) else None), definition
+    tool_name = tool.get("tool_name") or tool.get("name")
+    return (tool_name if isinstance(tool_name, str) else None), None
+
+
+def _apply_tool_change_blocks(
+    messages: list[AllMessageValues],
+    tools: Sequence[object] | None,
+) -> tuple[list[AllMessageValues], list[object] | None]:
+    """Apply Anthropic mid-conversation ``tool_addition``/``tool_removal`` blocks (#47723).
+
+    These blocks arrive inside message content (e.g. on the system message) and
+    the generic content tokenizer rejects them. Apply them in message order
+    instead: drop the event blocks from the content and derive the effective
+    tool set, so added tool schemas are counted through the ``tools`` argument
+    and removed ones stop counting, matching the provider's own count. Blocks
+    without a usable name are dropped from the content without changing the
+    tool set. When no such block is present the inputs pass through unchanged.
+    """
+    has_blocks: Final = any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), list)
+        and any(
+            isinstance(block, dict) and block.get("type") in ("tool_addition", "tool_removal")
+            for block in cast(list, message["content"])
+        )
+        for message in messages
+    )
+    if not has_blocks:
+        return messages, list(tools) if tools is not None else None
+
+    effective_tools: Final[dict[str, object]] = {}
+    for tool in tools or ():
+        if isinstance(tool, Mapping):
+            name: Final = _tool_definition_name(tool)
+            if name is not None:
+                effective_tools[name] = tool
+
+    new_messages: Final = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            new_messages.append(message)
+            continue
+        kept_blocks: Final = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") not in ("tool_addition", "tool_removal"):
+                kept_blocks.append(block)
+                continue
+            name, definition = _tool_change_block_name_and_definition(block)
+            if name is None:
+                continue
+            if block["type"] == "tool_removal":
+                effective_tools.pop(name, None)
+            else:
+                effective_tools[name] = definition if definition is not None else {"name": name}
+        new_messages.append({**message, "content": kept_blocks})
+    return new_messages, list(effective_tools.values())
+
+
+def _tool_definition_name(tool: Mapping[str, object]) -> str | None:
+    name = tool.get("name")
+    if isinstance(name, str):
+        return name
+    function = tool.get("function")
+    if isinstance(function, Mapping):
+        function_name = function.get("name")
+        if isinstance(function_name, str):
+            return function_name
+    return None
+
+
 def token_counter(
     model="",
     custom_tokenizer: dict | SelectTokenizerResponse | None = None,
@@ -470,13 +557,19 @@ def token_counter(
         num_tokens = count_function(text_to_count)
 
     elif messages is not None:
-        new_messages: Final = cast(list[AllMessageValues], convert_list_message_to_dict(messages))
+        new_messages, effective_tools = _apply_tool_change_blocks(
+            cast(list[AllMessageValues], convert_list_message_to_dict(messages)), tools
+        )
         params: Final = _MessageCountParams(model, custom_tokenizer)
         num_tokens = _count_messages(params, new_messages, use_default_image_token_count, default_token_count)
         if count_response_tokens is False:
             includes_system_message: Final = any(message.get("role", None) == "system" for message in new_messages)
             num_tokens += _count_extra(
-                params.count_function, tools, tool_choice, includes_system_message, params.tool_section
+                params.count_function,
+                cast(list[ChatCompletionToolParam], effective_tools),
+                tool_choice,
+                includes_system_message,
+                params.tool_section,
             )
 
     else:

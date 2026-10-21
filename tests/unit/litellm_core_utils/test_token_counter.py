@@ -2321,3 +2321,79 @@ def test_get_modified_max_tokens_leaves_a_gemini_4_long_decode_budget_alone(monk
         )
         == 200_000
     )
+
+
+def test_token_counter_with_tool_addition_and_removal_blocks():
+    """
+    Regression test (#47723): Anthropic mid-conversation tool management sends
+    `tool_addition` / `tool_removal` content blocks (e.g. on the system
+    message). Before the fix, token_counter raised
+    `Invalid content item type: tool_addition`, and the anthropic
+    /v1/messages/count_tokens local fallback returned HTTP 500.
+
+    The counter must apply the blocks in message order: added tool schemas
+    count through the tools argument, removed tools stop counting, and the
+    event blocks themselves are not tokenized as message content.
+    """
+    base_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "kept_tool",
+                "description": "stays",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    addition_block = {
+        "type": "tool_addition",
+        "tool": {
+            "type": "tool_definition",
+            "definition": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        },
+    }
+    removal_block = {
+        "type": "tool_removal",
+        "tool": {"type": "tool_reference", "tool_name": "kept_tool"},
+    }
+
+    def count(blocks, tools=None):
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are helpful."}] + blocks,
+            },
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        return token_counter_new(
+            model="anthropic/claude-sonnet-4-5-20250929", messages=messages, tools=tools
+        )
+
+    plain = count([], tools=base_tools)
+    added = count([addition_block], tools=base_tools)
+    removed = count([removal_block], tools=base_tools)
+
+    assert added > plain, "an added tool schema must increase the count"
+    assert removed < plain, "a removed tool must decrease the count"
+
+    # Blocks apply in message order: adding then removing the same tool cancels out.
+    cancelled = count(
+        [
+            addition_block,
+            {"type": "tool_removal", "tool": {"type": "tool_reference", "tool_name": "get_weather"}},
+        ],
+        tools=base_tools,
+    )
+    assert cancelled == plain
+
+    # The exact failing payload from the issue must not raise.
+    only_addition = count([addition_block])
+    assert only_addition > 0
+
+    # A block with an unusable payload is skipped, not fatal.
+    malformed = count([{"type": "tool_addition", "tool": {"type": "unknown_payload"}}])
+    assert malformed > 0
