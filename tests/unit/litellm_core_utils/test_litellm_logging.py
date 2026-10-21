@@ -11919,6 +11919,26 @@ def test_get_model_cost_information_custom_pricing_uses_base_model():
         init_response_obj={"model": "invoke_test_claude"},
     )
     assert result["model_map_value"] is not None
+
+
+def test_get_model_cost_information_base_model_priced_under_other_provider():
+    """Regression test (#47675): a deployment whose custom_llm_provider
+    differs from the provider of the cost-map row its base_model points at
+    logged a null model_map_value, because the lookup forced the deployment's
+    provider onto the base_model name. The lookup must price the explicit
+    base_model under its own provider, mirroring completion_cost."""
+    result = StandardLoggingPayloadSetup.get_model_cost_information(
+        base_model="tencent/deepseek-v4.1-flash",
+        custom_pricing=None,
+        custom_llm_provider="anthropic",
+        init_response_obj={"model": "deepseek/deepseek-v4.1-flash-1017"},
+    )
+    assert result["model_map_key"] == "tencent/deepseek-v4.1-flash"
+    assert result["model_map_value"] is not None
+    assert result["model_map_value"]["litellm_provider"] == "tencent"
+    assert result["model_map_value"]["input_cost_per_token"] == 3e-07
+    assert result["model_map_value"]["output_cost_per_token"] == 1.2e-06
+    assert all(field in result for field in StandardLoggingModelInformation.__annotations__)
     assert result["model_map_key"] != "invoke_test_claude"
 
 @pytest.mark.usefixtures("_vcr_outcome_gate", "drain_logging_worker", "isolate_litellm_state", "setup_and_teardown")

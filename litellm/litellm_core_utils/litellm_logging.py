@@ -51,6 +51,7 @@ from litellm.constants import (
 from litellm.cost_calculator import (
     RealtimeAPITokenUsageProcessor,
     ResponsesWebSocketTokenUsageProcessor,
+    _base_model_pricing_provider,
     get_usage_object,
     pricing_entry_for_cost_calc,
     select_model_name_for_cost_calc,
@@ -6566,10 +6567,20 @@ class StandardLoggingPayloadSetup:
         if model_cost_name is None:
             model_cost_information = StandardLoggingModelInformation(model_map_key="", model_map_value=None)
         else:
+            # Price an explicit base_model under its own provider when the
+            # deployment's provider has no rates for it, mirroring the
+            # completion_cost path; otherwise the provider mismatch raises
+            # ModelNotMappedError and the payload logs a null model_map_value
+            # for a row the cost map does price (#47675).
+            pricing_provider: Final = (
+                _base_model_pricing_provider(base_model, custom_llm_provider)
+                if base_model is not None and custom_pricing is not True
+                else None
+            ) or custom_llm_provider
             try:
                 _model_cost_information: Final = litellm.get_model_info(
                     model=pricing_model_name or model_cost_name,
-                    custom_llm_provider=custom_llm_provider,
+                    custom_llm_provider=pricing_provider,
                     api_base=api_base,
                 )
                 model_cost_information = StandardLoggingModelInformation(
