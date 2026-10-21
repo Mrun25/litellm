@@ -157,6 +157,85 @@ def test_httpx_timeout_preserved_for_openai():
     assert isinstance(out, httpx.Timeout)
 
 
+# Providers verified to route chat completions over LiteLLM's own httpx
+# handler (base_llm_http_handler.completion) or an httpx.Timeout-aware
+# handler. For these a split httpx.Timeout must survive resolution intact
+# (issue #47822).
+HTTPX_TIMEOUT_PROVIDERS: Final = [
+    "a2a",
+    "anthropic",
+    "bytez",
+    "cloudflare",
+    "cohere_chat",
+    "cometapi",
+    "compactifai",
+    "databricks",
+    "databricks_agent",
+    "datarobot",
+    "deepseek",
+    "edenai",
+    "fal_ai",
+    "gdc",
+    "gigachat",
+    "gradient_ai",
+    "groq",
+    "heroku",
+    "hosted_vllm",
+    "huggingface",
+    "langflow",
+    "langgraph",
+    "lemonade",
+    "minimax",
+    "mistral",
+    "nadir",
+    "oci",
+    "ollama",
+    "ollama_chat",
+    "openrouter",
+    "ovhcloud",
+    "ragflow",
+    "scaledown",
+    "snowflake",
+    "together_ai",
+    "triton",
+    "xai",
+]
+
+
+@pytest.mark.parametrize("provider", HTTPX_TIMEOUT_PROVIDERS)
+def test_httpx_timeout_preserved_for_providers_on_litellm_httpx_handler(provider: str):
+    """#47822: connect/read split timeouts must reach these transports intact
+    instead of being collapsed to the read value."""
+    t: Final = httpx.Timeout(10.0, connect=1.0)
+    out: Final = CompletionTimeout.resolve(
+        t,
+        {},
+        provider,
+        global_timeout=None,
+        supports_httpx_timeout=supports_httpx_timeout,
+        stream_kind=StreamKind.NOT_STREAMED,
+    )
+    assert out is t
+    assert isinstance(out, httpx.Timeout)
+
+
+@pytest.mark.parametrize("provider", ["azure_ai", "sagemaker", "vertex_ai"])
+def test_httpx_timeout_still_coerced_for_native_sdk_providers(provider: str):
+    """Providers on a native SDK that takes a scalar timeout keep the
+    historical coercion."""
+    t: Final = httpx.Timeout(10.0, connect=1.0)
+    out: Final = CompletionTimeout.resolve(
+        t,
+        {},
+        provider,
+        global_timeout=None,
+        supports_httpx_timeout=supports_httpx_timeout,
+        stream_kind=StreamKind.NOT_STREAMED,
+    )
+    assert out == 10.0
+    assert not isinstance(out, httpx.Timeout)
+
+
 @pytest.mark.parametrize("source", ("model", "timeout", "request_timeout"))
 def test_sdk_timeout_preserves_components_for_httpx_providers(
     source: Literal["model", "timeout", "request_timeout"],

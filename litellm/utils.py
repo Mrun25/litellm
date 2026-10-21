@@ -2849,8 +2849,59 @@ def token_counter(
 def supports_httpx_timeout(custom_llm_provider: str) -> bool:
     """
     Helper function to know if a provider implementation supports httpx timeout
+
+    A provider is listed when its chat completion path transports over
+    LiteLLM's own httpx handler (``base_llm_http_handler.completion``) or an
+    httpx.Timeout-aware handler, so a split ``httpx.Timeout`` (e.g.
+    ``connect=`` / ``read=``) reaches the transport intact instead of being
+    collapsed to a single float. Providers routed through a native SDK that
+    only accepts a scalar timeout (azure_ai, sagemaker, vertex_ai's non-Gemini
+    models, ...) stay unlisted: for them the timeout is coerced to a float.
     """
-    supported_providers: Final = ["openai", "azure", "bedrock"]
+    supported_providers: Final = [
+        "openai",
+        "azure",
+        "bedrock",
+        # Providers whose chat completion dispatches to LiteLLM's httpx handler
+        # (verified in litellm/main.py and the provider modules).
+        "a2a",
+        "anthropic",
+        "bytez",
+        "cloudflare",
+        "cohere_chat",
+        "cometapi",
+        "compactifai",
+        "databricks",
+        "databricks_agent",
+        "datarobot",
+        "deepseek",
+        "edenai",
+        "fal_ai",
+        "gdc",
+        "gigachat",
+        "gradient_ai",
+        "groq",
+        "heroku",
+        "hosted_vllm",
+        "huggingface",
+        "langflow",
+        "langgraph",
+        "lemonade",
+        "minimax",
+        "mistral",
+        "nadir",
+        "oci",
+        "ollama",
+        "ollama_chat",
+        "openrouter",
+        "ovhcloud",
+        "ragflow",
+        "scaledown",
+        "snowflake",
+        "together_ai",
+        "triton",
+        "xai",
+    ]
 
     if custom_llm_provider in supported_providers:
         return True
