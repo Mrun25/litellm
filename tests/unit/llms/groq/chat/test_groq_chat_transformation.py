@@ -523,3 +523,51 @@ def test_tool_search_reply_sent_to_groq_drops_litellm_response_fields():
             }
         ],
     }
+
+
+def test_groq_strips_reasoning_content_from_assistant_history():
+    """Regression test for https://github.com/BerriAI/litellm/issues/47931.
+
+    Groq's stream handler maps delta.reasoning to reasoning_content. When that
+    assistant reply is sent back on the next turn, Groq rejects the unknown
+    field, so the request path must strip it (like Mistral and Databricks).
+    """
+    from litellm.llms.groq.chat.transformation import (
+        GroqChatCompletionStreamingHandler,
+    )
+
+    handler = GroqChatCompletionStreamingHandler(streaming_response=None, sync_stream=True)
+    parsed = handler.chunk_parser(
+        {
+            "id": "chatcmpl-x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "openai/gpt-oss-120b",
+            "choices": [
+                {
+                    "delta": {"reasoning": "let me think", "content": "Hi"},
+                    "index": 0,
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
+    assert parsed.choices[0].delta.reasoning_content == "let me think"
+
+    request = GroqChatConfig().transform_request(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "Hi",
+                "reasoning_content": parsed.choices[0].delta.reasoning_content,
+            },
+            {"role": "user", "content": "and again"},
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+
+    assert request["messages"][1] == {"role": "assistant", "content": "Hi"}
