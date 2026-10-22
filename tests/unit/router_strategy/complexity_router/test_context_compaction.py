@@ -15,6 +15,7 @@ from litellm.router_strategy.complexity_router.config import ContextCompactionCo
 from litellm.router_strategy.complexity_router.context_compaction import (
     CompactionState,
     Surface,
+    _native_prefix,
     arm_compaction,
     compact_to_fit,
     compaction_executor,
@@ -501,3 +502,38 @@ async def test_retry_reuses_summary_or_terminal_cancellation(outcome: Literal["s
         assert calls.qsize() == 1 and stopped.is_set()
     finally:
         compaction_executor.reset(token)
+
+
+async def test_native_prefix_accepts_replayed_assistant_history_without_annotations() -> None:
+    """Replayed assistant history is spec-valid even when output_text parts omit
+    the annotations the SDK param types require; the responses native-prefix
+    path must not reject it (previously surfaced as
+    'Invalid content type: ValidatorIterator')."""
+    payload: Final = {
+        "model": "summary-fixture",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Reply with the single word: ok"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_0abc123def456",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok"}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Again"}],
+            },
+        ],
+    }
+
+    prefixed: Final = _native_prefix(payload, "responses")
+
+    messages: Final = prefixed["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[1]["content"] == [{"type": "text", "text": "ok"}]

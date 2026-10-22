@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import takewhile
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, NoReturn, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Final, Literal, NoReturn, Protocol, TypeAlias, cast
 
 from pydantic import TypeAdapter
 
@@ -309,8 +309,12 @@ def _native_prefix(payload: Mapping[str, object], surface: Surface) -> Mapping[s
 
     from litellm.responses.litellm_completion_transformation.transformation import LiteLLMCompletionResponsesConfig
 
+    # Pass the input items through unvalidated: the strict SDK param types reject
+    # spec-tolerated replayed history (for example assistant output_text parts
+    # without annotations) behind a lazy ValidatorIterator, which the transform
+    # then cannot read.
     messages: Final = LiteLLMCompletionResponsesConfig.transform_responses_api_input_to_messages(
-        input=TypeAdapter(ResponseInputParam).validate_python(payload["input"]),
+        input=cast(ResponseInputParam, payload["input"]),
         responses_api_request=_DICT.validate_python(payload),
     )
     tools, _ = LiteLLMCompletionResponsesConfig.transform_responses_api_tools_to_chat_completion_tools(

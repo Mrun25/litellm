@@ -7005,3 +7005,67 @@ async def test_bridge_partial_response_on_disconnect_bills_only_the_input_since_
     assert await _input_tokens_billed_on_disconnect(
         cast(ResponseInputParam, [*history_it_replaces, *since_compaction])
     ) == await _input_tokens_billed_on_disconnect(since_compaction)
+
+
+def test_pydantic_validated_assistant_history_transforms_to_chat_messages() -> None:
+    """Input pre-validated into ResponseInputParam carries lazy ValidatorIterator
+    content; the transform must still read it (previously raised
+    'Invalid content type: ValidatorIterator')."""
+    input_items: Final = TypeAdapter(ResponseInputParam).validate_python(
+        [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Reply with the single word: ok"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_0abc123def456",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Again"}],
+            },
+        ]
+    )
+
+    messages: Final = LiteLLMCompletionResponsesConfig.transform_responses_api_input_to_messages(
+        input=input_items, responses_api_request={}
+    )
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[1]["content"] == [{"type": "text", "text": "ok"}]
+
+
+def test_replayed_assistant_history_without_annotations_transforms() -> None:
+    """Clients replaying assistant turns may omit the annotations the SDK param
+    types mark required; the raw items must still transform."""
+    messages: Final = LiteLLMCompletionResponsesConfig.transform_responses_api_input_to_messages(
+        input=[
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Reply with the single word: ok"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_0abc123def456",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok"}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Again"}],
+            },
+        ],
+        responses_api_request={},
+    )
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[1]["content"] == [{"type": "text", "text": "ok"}]

@@ -2535,7 +2535,10 @@ class LiteLLMCompletionResponsesConfig:
             return ""
         elif isinstance(content, str):
             return content
-        elif isinstance(content, list):
+        elif isinstance(content, Iterable) and not isinstance(content, (bytes, Mapping)):
+            # pydantic validates Iterable[...] fields (for example the content
+            # of a replayed assistant history message) to a ValidatorIterator,
+            # not a list - accept any non-mapping iterable here.
             content_list: Final[list[str | dict[str, object]]] = []
             for item in content:
                 if isinstance(item, str):
